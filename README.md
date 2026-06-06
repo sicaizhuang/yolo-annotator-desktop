@@ -8,25 +8,27 @@ large web platform.
 
 ## Features
 
-- Native desktop UI with no Docker, browser, account, or server.
-- Familiar File/Edit/View/Annotation/Dataset menus plus a compact icon toolbar.
-- Draw, select, resize, reclassify, and delete standard YOLO boxes.
-- Draw three-point rotated rectangles saved in standard YOLO OBB format.
-- Autosave after every edit.
-- Undo/redo, zoom around cursor, right-drag pan, and hideable labels.
-- Jump to an image or move directly to the next unreviewed image.
-- Portable `.yad.json` project files.
-- Create an empty dataset, wrap existing folders, or import a YOLO `data.yaml` split.
-- Safe class add/rename/delete/reorder with label backup and ID remapping.
-- Dataset quality checks for invalid labels, bounds, orphan labels, and duplicate stems.
-- Detects mixed Detect/OBB labels and blocks invalid training export.
-- Deterministic train/validation export with a ready-to-use `data.yaml`.
-- Supports JPG, JPEG, PNG, BMP, and WebP.
+- Native local desktop UI with no Docker, browser, account, database, or server.
+- Searchable image browser with reviewed/labeled/empty filters and explicit reviewed-empty images.
+- Draw, select, move, resize, nudge, reclassify, copy, paste, and duplicate YOLO boxes.
+- Three-point rotated rectangles with rectangular corner resizing and standard YOLO OBB storage.
+- Atomic autosave, undo/redo, session backups, stale-aware project locks, and crash logs.
+- Malformed label rows are preserved during editing instead of silently discarded.
+- Portable `.yad.json` projects and nested image/label directory support.
+- Create or import projects from folders, YOLO `data.yaml`, COCO JSON, and Pascal VOC XML.
+- Export YOLO train/validation datasets, COCO JSON, or Pascal VOC XML.
+- Quality checks cover corrupt images, invalid geometry/classes, mixed formats, duplicate boxes/images, orphan labels, and unused classes.
+- Blocking errors and non-blocking warnings are reported separately.
+- Safe class add/rename/delete/reorder with complete backups and ID remapping.
+- Supports JPG, JPEG, PNG, BMP, WebP, TIFF, and nested datasets.
 
 ## Windows Quick Start
 
 Double-click `run_windows.cmd`. On first launch it creates a local virtual
 environment and installs the runtime dependencies.
+
+After the first launch, double-click `launch_windows.vbs` for a quiet desktop
+start. Run `create_desktop_shortcut.cmd` once to add a desktop shortcut.
 
 Or run manually:
 
@@ -34,6 +36,12 @@ Or run manually:
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m yolo_annotator_desktop
+```
+
+Open a project directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m yolo_annotator_desktop path\to\project.yad.json
 ```
 
 ## Project Format
@@ -73,15 +81,19 @@ class_id x1 y1 x2 y2 x3 y3 x4 y4
 
 | Action | Control |
 |---|---|
-| Draw box | Left-drag empty image area |
+| Select/move | `V`; drag a selected box |
+| Draw box | `B`; left-drag anywhere on the image |
 | Standard rectangle mode | `B` or the rectangle toolbar icon |
 | Three-point rotated rectangle | `R` or the rotated-rectangle toolbar icon; drag first edge, release, move to set width, click |
 | Select box | Left-click box, right-click box, or use list |
-| Resize selected box | Drag white handles |
-| Pan | Right-drag |
+| Resize selected box | Drag white handles, including OBB corners |
+| Nudge selected box | Arrow keys; hold `Shift` for 10 pixels |
+| Copy / paste / duplicate | `Ctrl+C` / `Ctrl+V` / `Ctrl+D` |
+| Pan | Right-drag or middle-drag |
 | Zoom | Mouse wheel |
-| Previous / next | `A` / `D` or arrow keys |
+| Previous / next | `A` / `D`; arrow keys navigate when no box is selected |
 | Next unreviewed | `U` |
+| Mark reviewed empty | `N` |
 | Reclassify selected box | Choose class, then `C` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y` |
 | Hide labels | `H` |
@@ -90,8 +102,10 @@ class_id x1 y1 x2 y2 x3 y3 x4 y4
 
 ## Safety
 
-The class manager creates a complete label-folder backup before changing class
-IDs. Dataset export never edits source images or labels.
+Labels, projects, preferences, and reports use atomic writes. The first edit to
+each label in a session creates a recovery copy. Class-ID changes create a
+complete backup before remapping. Export never edits source images or labels and
+refuses destinations inside source image/label folders.
 
 ## Development
 

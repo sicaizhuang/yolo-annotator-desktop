@@ -1,15 +1,42 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 import random
 import shutil
 
+from PIL import Image, UnidentifiedImageError
+
 from .project import ProjectConfig
+from .safe_io import atomic_write_text
 
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+IGNORED_DIR_NAMES = {".git", ".yad_backups", "__pycache__"}
+EXPORT_BLOCKING_ISSUES = {
+    "mixed_annotation_formats",
+    "annotation_mode_mismatch",
+    "corrupt_image",
+    "invalid_columns",
+    "invalid_number",
+    "invalid_class",
+    "invalid_bounds",
+    "box_outside_image",
+    "obb_point_outside_image",
+    "degenerate_obb",
+    "duplicate_label_target",
+    "exact_duplicate_box",
+}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def find_images(image_dir: Path) -> list[Path]:
@@ -18,26 +45,50 @@ def find_images(image_dir: Path) -> list[Path]:
         for path in sorted(image_dir.rglob("*"))
         if path.is_file()
         and path.suffix.lower() in IMAGE_EXTS
-        and not any(part.startswith("_") for part in path.parts)
+        and not any(
+            part.startswith(".") or part in IGNORED_DIR_NAMES
+            for part in path.relative_to(image_dir).parts[:-1]
+        )
     ]
 
 
-def inspect_project(project: ProjectConfig) -> dict:
+def inspect_project(project: ProjectConfig, verify_images: bool = True) -> dict:
     classes = project.class_names()
     images = find_images(project.image_dir)
-    image_stems = Counter(path.stem for path in images)
+    expected_label_paths = Counter(str(project.label_path_for(path, prefer_existing=False).resolve()) for path in images)
     label_files = sorted(project.label_dir.rglob("*.txt"))
     class_counts = Counter()
     format_counts = Counter()
     issues: list[dict] = []
     labeled = empty = 0
+    image_sizes = Counter()
+    image_hashes: dict[str, Path] = {}
 
-    for stem, count in image_stems.items():
+    for label_path, count in expected_label_paths.items():
         if count > 1:
-            issues.append({"type": "duplicate_image_stem", "file": stem, "detail": f"{count} images share this stem"})
+            issues.append({"type": "duplicate_label_target", "file": label_path, "detail": f"{count} images map to this label"})
 
     for image in images:
-        label = project.label_dir / f"{image.stem}.txt"
+        if verify_images:
+            try:
+                with Image.open(image) as source:
+                    source.verify()
+                with Image.open(image) as source:
+                    image_sizes[f"{source.width}x{source.height}"] += 1
+                digest = file_sha256(image)
+                if digest in image_hashes:
+                    issues.append(
+                        {
+                            "type": "duplicate_image_content",
+                            "file": str(image),
+                            "detail": f"Exact duplicate of {image_hashes[digest]}",
+                        }
+                    )
+                else:
+                    image_hashes[digest] = image
+            except (OSError, UnidentifiedImageError) as exc:
+                issues.append({"type": "corrupt_image", "file": str(image), "detail": str(exc)})
+        label = project.label_path_for(image)
         if not label.exists():
             continue
         text = label.read_text(encoding="utf-8-sig").strip()
@@ -45,6 +96,7 @@ def inspect_project(project: ProjectConfig) -> dict:
             empty += 1
             continue
         labeled += 1
+        seen_boxes = set()
         for line_number, line in enumerate(text.splitlines(), 1):
             parts = line.split()
             if len(parts) not in (5, 9):
@@ -59,6 +111,11 @@ def inspect_project(project: ProjectConfig) -> dict:
             if class_id < 0 or class_id >= len(classes):
                 issues.append({"type": "invalid_class", "file": str(label), "line": line_number, "detail": class_id})
                 continue
+            duplicate_key = (class_id, *(round(value, 8) for value in coords))
+            if duplicate_key in seen_boxes:
+                issues.append({"type": "exact_duplicate_box", "file": str(label), "line": line_number, "detail": line})
+                continue
+            seen_boxes.add(duplicate_key)
             class_counts[classes[class_id]] += 1
             if len(parts) == 5:
                 format_counts["detect"] += 1
@@ -71,10 +128,27 @@ def inspect_project(project: ProjectConfig) -> dict:
                 format_counts["obb"] += 1
                 if any(value < 0 or value > 1 for value in coords):
                     issues.append({"type": "obb_point_outside_image", "file": str(label), "line": line_number, "detail": line})
+                points = list(zip(coords[::2], coords[1::2]))
+                area = abs(
+                    sum(
+                        points[idx][0] * points[(idx + 1) % len(points)][1]
+                        - points[(idx + 1) % len(points)][0] * points[idx][1]
+                        for idx in range(len(points))
+                    )
+                    / 2
+                )
+                if area <= 1e-8:
+                    issues.append({"type": "degenerate_obb", "file": str(label), "line": line_number, "detail": line})
 
-    valid_stems = set(image_stems)
+    valid_label_paths = {
+        project.label_path_for(image).resolve()
+        for image in images
+    } | {
+        project.label_path_for(image, prefer_existing=False).resolve()
+        for image in images
+    }
     for label in label_files:
-        if label.stem not in valid_stems:
+        if label.resolve() not in valid_label_paths:
             issues.append({"type": "orphan_label", "file": str(label), "detail": "No matching image stem"})
 
     used_formats = [name for name, count in format_counts.items() if count]
@@ -95,6 +169,20 @@ def inspect_project(project: ProjectConfig) -> dict:
             }
         )
 
+    for name in classes:
+        if class_counts[name] == 0:
+            issues.append(
+                {
+                    "type": "unused_class",
+                    "file": str(project.classes_path),
+                    "detail": f"No boxes use class: {name}",
+                }
+            )
+
+    for issue in issues:
+        issue["severity"] = "error" if issue["type"] in EXPORT_BLOCKING_ISSUES else "warning"
+    issue_type_counts = Counter(issue["type"] for issue in issues)
+    severity_counts = Counter(issue["severity"] for issue in issues)
     return {
         "project": project.name,
         "images": len(images),
@@ -104,6 +192,11 @@ def inspect_project(project: ProjectConfig) -> dict:
         "boxes": sum(class_counts.values()),
         "class_counts": dict(class_counts),
         "format_counts": dict(format_counts),
+        "image_sizes": dict(image_sizes),
+        "issue_types": dict(issue_type_counts),
+        "severity_counts": dict(severity_counts),
+        "blocking_issue_count": severity_counts["error"],
+        "warning_count": severity_counts["warning"],
         "issues": issues,
         "issue_count": len(issues),
     }
@@ -112,25 +205,49 @@ def inspect_project(project: ProjectConfig) -> dict:
 def write_report(project: ProjectConfig, output: Path) -> dict:
     report = inspect_project(project)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(output, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     return report
+
+
+def assert_exportable(report: dict) -> None:
+    if report["images"] == 0:
+        raise ValueError("Dataset export blocked because the project contains no images.")
+    blocking = [issue for issue in report["issues"] if issue["type"] in EXPORT_BLOCKING_ISSUES]
+    if not blocking:
+        return
+    summary = Counter(issue["type"] for issue in blocking)
+    raise ValueError(
+        "Dataset export blocked by quality issues: "
+        + ", ".join(f"{name} ({count})" for name, count in sorted(summary.items()))
+        + ". Run Quality Check and fix these issues first."
+    )
+
+
+def validate_export_directory(project: ProjectConfig, output: Path) -> Path:
+    output = output.resolve()
+    for source in (project.image_dir.resolve(), project.label_dir.resolve()):
+        if output == source or source in output.parents:
+            raise ValueError(
+                f"Export destination cannot be inside the source image or label directory: {output}"
+            )
+    if output.exists() and not output.is_dir():
+        raise ValueError("Export destination must be a directory.")
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("Export destination is not empty. Choose a new or empty directory to avoid stale files.")
+    return output
 
 
 def export_yolo_dataset(project: ProjectConfig, output: Path, val_ratio: float = 0.2, seed: int = 42) -> dict:
     source_report = inspect_project(project)
-    blocking = {"mixed_annotation_formats", "annotation_mode_mismatch"}
-    blocking_issues = [issue for issue in source_report["issues"] if issue["type"] in blocking]
-    if blocking_issues:
-        raise ValueError(
-            "Dataset export blocked because annotation formats do not match the project mode: "
-            + ", ".join(issue["type"] for issue in blocking_issues)
-        )
-    output = output.resolve()
+    assert_exportable(source_report)
+    output = validate_export_directory(project, output)
+    if not 0 < val_ratio < 1 and len(find_images(project.image_dir)) > 1:
+        raise ValueError("Validation ratio must be greater than 0 and less than 1.")
     images = find_images(project.image_dir)
     rng = random.Random(seed)
     rng.shuffle(images)
-    val_count = max(1, round(len(images) * val_ratio)) if len(images) > 1 else len(images)
-    val_stems = {path.stem for path in images[:val_count]}
+    val_count = max(1, min(len(images) - 1, round(len(images) * val_ratio))) if len(images) > 1 else 0
+    val_images = {path.resolve() for path in images[:val_count]}
 
     for split in ("train", "val"):
         (output / "images" / split).mkdir(parents=True, exist_ok=True)
@@ -138,14 +255,18 @@ def export_yolo_dataset(project: ProjectConfig, output: Path, val_ratio: float =
 
     copied = Counter()
     for image in images:
-        split = "val" if image.stem in val_stems else "train"
-        shutil.copy2(image, output / "images" / split / image.name)
-        source_label = project.label_dir / f"{image.stem}.txt"
-        target_label = output / "labels" / split / f"{image.stem}.txt"
+        split = "val" if image.resolve() in val_images else "train"
+        relative = image.relative_to(project.image_dir)
+        target_image = output / "images" / split / relative
+        target_image.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image, target_image)
+        source_label = project.label_path_for(image)
+        target_label = output / "labels" / split / relative.with_suffix(".txt")
+        target_label.parent.mkdir(parents=True, exist_ok=True)
         if source_label.exists():
             shutil.copy2(source_label, target_label)
         else:
-            target_label.write_text("", encoding="utf-8")
+            atomic_write_text(target_label, "")
         copied[split] += 1
 
     names = project.class_names()
@@ -157,8 +278,9 @@ def export_yolo_dataset(project: ProjectConfig, output: Path, val_ratio: float =
         "names:",
         *[f"  {idx}: {json.dumps(name, ensure_ascii=False)}" for idx, name in enumerate(names)],
     ]
-    (output / "data.yaml").write_text("\n".join(yaml_lines) + "\n", encoding="utf-8")
-    (output / "source_qc_report.json").write_text(
-        json.dumps(source_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    atomic_write_text(output / "data.yaml", "\n".join(yaml_lines) + "\n")
+    atomic_write_text(
+        output / "source_qc_report.json",
+        json.dumps(source_report, ensure_ascii=False, indent=2) + "\n",
     )
     return {"train": copied["train"], "val": copied["val"], "output": str(output)}

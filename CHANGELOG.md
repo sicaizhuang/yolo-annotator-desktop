@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0 - 2026-06-07
+
+- Redesigned the project hub around review progress, dataset metrics, recent projects, and common actions.
+- Added a searchable/filterable image browser, scrollable class browser, hideable side panels, and a selected-object list.
+- Added select/move mode, arrow-key nudging, copy/paste/duplicate, AABB handles, and rectangular OBB corner resizing.
+- Added explicit reviewed-empty images, cursor-centered zoom, actual-pixel view, and natural image sorting.
+- Made project, state, label, report, and export writes atomic; added session label backups and stale-aware project locks.
+- Preserves malformed label rows during editing instead of silently discarding them.
+- Added centralized crash logging and visible callback error reporting.
+- Added full image decode checks, duplicate image/box detection, unused-class warnings, issue severities, and safer export blocking.
+- Added nested image/label layouts and TIFF images.
+- Added COCO JSON and Pascal VOC import/export, including COCO OBB round trips.
+- Added project creation from empty folders, existing folders, YOLO YAML, COCO JSON, and Pascal VOC XML.
+- Added deterministic YOLO export controls and protected source directories from accidental export pollution.
+- Added direct project-file startup, macOS Command shortcuts, and a broader automated test suite.
+- Moved full quality checks and exports to background workers so the interface remains responsive.
+- Fixed single-image export so the only image remains in the training split.
+- Added a quiet Windows launcher and an optional desktop-shortcut creator.
+
 ## 0.1.0 - 2026-06-07
 
 - First open-source-ready release.

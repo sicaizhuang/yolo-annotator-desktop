@@ -6,6 +6,27 @@ import tkinter as tk
 from PIL import Image, ImageDraw, ImageTk
 
 
+def fit_window(window, preferred, minimum=(480, 360), margin=(80, 120), position=(20, 20)):
+    available_width = max(480, window.winfo_screenwidth() - margin[0])
+    available_height = max(360, window.winfo_screenheight() - margin[1])
+    width = min(preferred[0], available_width)
+    height = min(preferred[1], available_height)
+    window.geometry(f"{width}x{height}+{position[0]}+{position[1]}")
+    window.minsize(min(minimum[0], width), min(minimum[1], height))
+    return width, height
+
+
+def set_app_icon(window):
+    image = Image.new("RGBA", (64, 64), (25, 28, 32, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((8, 8, 56, 56), radius=7, outline=(244, 247, 250, 255), width=4)
+    draw.rectangle((17, 18, 43, 40), outline=(38, 154, 255, 255), width=4)
+    draw.line((25, 45, 32, 52, 51, 29), fill=(42, 205, 120, 255), width=5, joint="curve")
+    icon = ImageTk.PhotoImage(image, master=window)
+    window.iconphoto(True, icon)
+    window._yad_app_icon = icon
+
+
 class Tooltip:
     def __init__(self, widget: tk.Widget, text: str):
         self.widget = widget
@@ -86,6 +107,9 @@ class IconSet:
     def _draw_rect(self, draw):
         draw.rectangle((3, 4, 17, 16), outline=self.accent, width=2)
 
+    def _draw_select(self, draw):
+        draw.polygon([(4, 2), (4, 17), (8, 13), (11, 19), (14, 17), (11, 12), (17, 12)], fill=self.color)
+
     def _draw_obb(self, draw):
         draw.polygon([(4, 7), (14, 3), (17, 13), (7, 17)], outline=self.accent)
         self._line(draw, [(4, 7), (14, 3), (17, 13), (7, 17), (4, 7)], fill=self.accent)
@@ -138,6 +162,20 @@ class IconSet:
     def _draw_help(self, draw):
         draw.ellipse((3, 3, 17, 17), outline=self.color, width=2)
         draw.text((7, 3), "?", fill=self.color)
+
+    def _draw_copy(self, draw):
+        draw.rectangle((6, 3, 17, 14), outline=self.color, width=2)
+        draw.rectangle((3, 6, 14, 17), outline=self.accent, width=2)
+
+    def _draw_empty(self, draw):
+        draw.rectangle((3, 3, 17, 17), outline=self.color, width=2)
+        self._line(draw, [(6, 10), (9, 13), (15, 6)], fill="#16803c", width=2)
+
+    def _draw_browser(self, draw):
+        draw.rectangle((2, 3, 18, 17), outline=self.color, width=2)
+        self._line(draw, [(7, 3), (7, 17)])
+        for y in (7, 11, 15):
+            self._line(draw, [(3, y), (6, y)], fill=self.accent)
 
 
 def icon_button(parent, image, tooltip: str, command, *, variable=None, value=None):

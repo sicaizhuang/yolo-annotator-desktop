@@ -21,8 +21,8 @@ EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".log"}
 EXCLUDED_NAMES = {"run_ocg_project.cmd", "ocg_qc_report.json"}
 FORBIDDEN_TEXT = (
     "D:" + "\\MODEL\\YOLO_Tutorial",
-    "C:" + "\\Users\\CHASER",
     "192.168." + "0.177",
+    str(Path.home()),
 )
 
 
@@ -36,7 +36,7 @@ def is_public_file(path: Path, root: Path) -> bool:
 
 
 def validate_text(path: Path):
-    if path.suffix.lower() not in {".py", ".md", ".toml", ".txt", ".json", ".yml", ".yaml", ".cmd", ".ps1"}:
+    if path.suffix.lower() not in {".py", ".md", ".toml", ".txt", ".json", ".yml", ".yaml", ".cmd", ".ps1", ".vbs"}:
         return
     text = path.read_text(encoding="utf-8-sig", errors="ignore")
     for forbidden in FORBIDDEN_TEXT:
