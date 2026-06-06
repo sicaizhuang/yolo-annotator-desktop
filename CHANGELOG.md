@@ -18,3 +18,11 @@
 - Added dataset creation methods for empty projects, existing folders, and existing YOLO `data.yaml` splits.
 - Added project-level Detect/OBB annotation type and blocked invalid mixed-format export.
 - Opening a project directly now enters the annotation workspace instead of the project hub.
+
+## 0.3.0 - 2026-06-07
+
+- Added familiar File, Edit, View, Annotation, Dataset, and Help menus.
+- Replaced font-dependent toolbar symbols with clear bitmap icons and hover explanations.
+- Added direct actions for opening projects, image folders, label folders, and class files.
+- Added quality check and YOLO export actions directly inside the annotation workspace.
+- Simplified the toolbar so frequent actions stay visible and less-used actions live in menus.

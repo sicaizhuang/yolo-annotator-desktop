@@ -9,6 +9,7 @@ large web platform.
 ## Features
 
 - Native desktop UI with no Docker, browser, account, or server.
+- Familiar File/Edit/View/Annotation/Dataset menus plus a compact icon toolbar.
 - Draw, select, resize, reclassify, and delete standard YOLO boxes.
 - Draw three-point rotated rectangles saved in standard YOLO OBB format.
 - Autosave after every edit.
@@ -73,8 +74,8 @@ class_id x1 y1 x2 y2 x3 y3 x4 y4
 | Action | Control |
 |---|---|
 | Draw box | Left-drag empty image area |
-| Standard rectangle mode | `B` or `□` |
-| Three-point rotated rectangle | `R` or `↔`; drag first edge, release, move to set width, click |
+| Standard rectangle mode | `B` or the rectangle toolbar icon |
+| Three-point rotated rectangle | `R` or the rotated-rectangle toolbar icon; drag first edge, release, move to set width, click |
 | Select box | Left-click box, right-click box, or use list |
 | Resize selected box | Drag white handles |
 | Pan | Right-drag |

@@ -16,7 +16,7 @@ from .qc import export_yolo_dataset, inspect_project
 
 
 APP_NAME = "YOLO Annotator Desktop"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 STATE_PATH = Path.home() / ".yolo_annotator_desktop.json"
 
 
@@ -27,11 +27,45 @@ class ProjectHub:
         self.root.title(f"{APP_NAME} {APP_VERSION}")
         self.root.geometry("780x520")
         self.root.minsize(680, 440)
+        self.build_menu()
         self.build_ui()
         if project_path:
             self.open_project(Path(project_path))
         else:
             self.load_last_project()
+
+    def build_menu(self):
+        menubar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="新建或导入数据集...", command=self.new_project, accelerator="Ctrl+N")
+        file_menu.add_command(label="打开项目...", command=self.choose_project, accelerator="Ctrl+O")
+        file_menu.add_command(label="打开项目目录", command=self.open_project_folder)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.root.destroy)
+        menubar.add_cascade(label="文件", menu=file_menu)
+
+        dataset_menu = tk.Menu(menubar, tearoff=False)
+        dataset_menu.add_command(label="打开标注窗口", command=self.launch_annotator)
+        dataset_menu.add_command(label="管理类别...", command=self.manage_classes)
+        dataset_menu.add_separator()
+        dataset_menu.add_command(label="质量检查...", command=self.run_qc)
+        dataset_menu.add_command(label="导出 YOLO 数据集...", command=self.export_dataset)
+        menubar.add_cascade(label="数据集", menu=dataset_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(
+            label="关于",
+            command=lambda: messagebox.showinfo(
+                "关于",
+                f"{APP_NAME} {APP_VERSION}\n本地优先、可开源的 YOLO 数据集标注工具",
+                parent=self.root,
+            ),
+        )
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        self.root.config(menu=menubar)
+        self.root.bind("<Control-n>", lambda _event: self.new_project())
+        self.root.bind("<Control-o>", lambda _event: self.choose_project())
 
     def build_ui(self):
         header = ttk.Frame(self.root, padding=18)

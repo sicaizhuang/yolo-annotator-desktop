@@ -1,14 +1,15 @@
 import argparse
 import copy
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import filedialog, messagebox, simpledialog
 
 from PIL import Image, ImageTk
-from .widgets import icon_button
+from .widgets import IconSet, icon_button
 
 
 PROJECT = Path.cwd()
@@ -43,7 +44,6 @@ class Annotator:
         self.labels_visible = True
         self.annotation_mode = annotation_mode
         self.tool_mode = tk.StringVar(value="obb" if annotation_mode == "obb" else "aabb")
-        self.more_visible = False
         self.obb_baseline = None
         self.obb_preview = None
         self.drag_start = None
@@ -63,6 +63,7 @@ class Annotator:
         self.right_drag_origin = None
         self.right_drag_moved = False
         self.current_class = tk.IntVar(value=0)
+        self.icons = IconSet(self.root)
 
         self.label_dir.mkdir(parents=True, exist_ok=True)
         self.root.title(f"YOLO Annotator Desktop - {image_dir.name}")
@@ -71,6 +72,7 @@ class Annotator:
         self.root.geometry(f"{window_width}x{window_height}+20+20")
         self.root.minsize(760, 600)
 
+        self.build_menu()
         self.build_ui()
         self.bind_keys()
         if not self.images:
@@ -99,83 +101,6 @@ class Annotator:
             images.sort(key=lambda path: (rank.get(path.name, len(rank)), path.name))
         return images
 
-    def build_ui(self):
-        top = tk.Frame(self.root, bd=1, relief=tk.GROOVE)
-        top.pack(side=tk.TOP, fill=tk.X, padx=6, pady=5)
-
-        icon_button(top, "□", "Axis-aligned rectangle (B)", lambda: self.set_tool_mode("aabb"), variable=self.tool_mode, value="aabb").pack(side=tk.LEFT, padx=2, pady=2)
-        icon_button(top, "↔", "Three-point rotated rectangle / YOLO OBB (R)", lambda: self.set_tool_mode("obb"), variable=self.tool_mode, value="obb").pack(side=tk.LEFT, padx=2, pady=2)
-        tk.Frame(top, width=1, bg="#bbbbbb").pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=4)
-        icon_button(top, "↶", "Undo (Ctrl+Z)", self.undo).pack(side=tk.LEFT, padx=2, pady=2)
-        icon_button(top, "↷", "Redo (Ctrl+Y)", self.redo).pack(side=tk.LEFT, padx=2, pady=2)
-        icon_button(top, "⊘", "Hide or show label text (H)", self.toggle_labels).pack(side=tk.LEFT, padx=2, pady=2)
-        tk.Frame(top, width=1, bg="#bbbbbb").pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=4)
-        icon_button(top, "‹", "Previous image (A / Left)", self.prev_image).pack(side=tk.LEFT, padx=2, pady=2)
-        icon_button(top, "›", "Next image (D / Right)", self.next_image).pack(side=tk.LEFT, padx=2, pady=2)
-        icon_button(top, "U", "Next unreviewed image", self.next_unreviewed).pack(side=tk.LEFT, padx=2, pady=2)
-        icon_button(top, "S", "Save labels (Ctrl+S)", self.save_labels).pack(side=tk.LEFT, padx=2, pady=2)
-        self.jump_value = tk.StringVar()
-        tk.Entry(top, width=5, textvariable=self.jump_value).pack(side=tk.LEFT, padx=(8, 2), pady=3)
-        icon_button(top, "↵", "Jump to image number (Ctrl+G)", self.jump_to_image).pack(side=tk.LEFT, padx=2, pady=2)
-        icon_button(top, "⋯", "Show or hide less-used actions", self.toggle_more).pack(side=tk.LEFT, padx=3, pady=2)
-
-        body = tk.Frame(self.root)
-        body.pack(fill=tk.BOTH, expand=True)
-        body.grid_rowconfigure(0, weight=1)
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, minsize=240)
-
-        self.canvas = tk.Canvas(body, bg="#151515", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.canvas.bind("<ButtonPress-1>", self.on_press)
-        self.canvas.bind("<B1-Motion>", self.on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_release)
-        self.canvas.bind("<ButtonPress-3>", self.on_right_press)
-        self.canvas.bind("<B3-Motion>", self.on_right_drag)
-        self.canvas.bind("<ButtonRelease-3>", self.on_right_release)
-        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
-        self.canvas.bind("<Motion>", self.on_motion)
-        self.canvas.bind("<Configure>", lambda _event: self.redraw())
-
-        panel = tk.Frame(body, width=240)
-        panel.grid(row=0, column=1, sticky="ns", padx=8, pady=4)
-        panel.pack_propagate(False)
-        self.panel = panel
-
-        class_header = tk.Frame(panel)
-        class_header.pack(fill=tk.X)
-        tk.Label(class_header, text="Classes").pack(side=tk.LEFT, anchor="w")
-        icon_button(class_header, "+", "Add a custom class", self.add_class).pack(side=tk.LEFT, padx=(8, 2))
-        icon_button(class_header, "≡", "Manage, rename, delete, or reorder classes", self.manage_classes).pack(side=tk.LEFT, padx=2)
-        self.class_frame = tk.Frame(panel)
-        self.class_frame.pack(fill=tk.X)
-        self.refresh_class_controls()
-
-        tk.Label(panel, text="Boxes").pack(anchor="w", pady=(12, 2))
-        self.box_list = tk.Listbox(panel, height=16)
-        self.box_list.pack(fill=tk.BOTH, expand=True)
-        self.box_list.bind("<<ListboxSelect>>", self.on_select_box)
-
-        box_actions = tk.Frame(panel)
-        box_actions.pack(fill=tk.X, pady=(6, 2))
-        icon_button(box_actions, "C", "Set selected box to current class", self.set_selected_class).pack(side=tk.LEFT, padx=2)
-        icon_button(box_actions, "×", "Delete selected box (Delete)", self.delete_selected).pack(side=tk.LEFT, padx=2)
-        icon_button(box_actions, "Esc", "Deselect box", self.clear_selection, width=4).pack(side=tk.LEFT, padx=2)
-
-        self.more_panel = tk.Frame(panel, bd=1, relief=tk.GROOVE)
-        self.more_panel.pack(fill=tk.X, pady=(6, 2))
-        tk.Button(self.more_panel, text="Delete all boxes", command=self.delete_all).pack(fill=tk.X, padx=4, pady=2)
-        tk.Button(self.more_panel, text="Reset zoom and pan", command=self.reset_view).pack(fill=tk.X, padx=4, pady=2)
-        tk.Button(self.more_panel, text="Save now", command=self.save_labels).pack(fill=tk.X, padx=4, pady=2)
-        tk.Button(self.more_panel, text="Open project and dataset hub", command=self.open_project_hub).pack(fill=tk.X, padx=4, pady=2)
-        self.more_panel.pack_forget()
-
-        help_text = "□ box   ↔ draw rotated   ◇ saved OBB"
-        tk.Label(panel, text=help_text, justify=tk.LEFT, fg="#666").pack(anchor="w", pady=(8, 4))
-
-        self.info = tk.Label(self.root, text="", anchor="w", bd=1, relief=tk.SUNKEN, padx=6)
-        self.info.pack(side=tk.BOTTOM, fill=tk.X)
-
     def refresh_class_controls(self):
         for child in self.class_frame.winfo_children():
             child.destroy()
@@ -184,6 +109,8 @@ class Annotator:
             tk.Radiobutton(self.class_frame, text=text, variable=self.current_class, value=idx, anchor="w").pack(fill=tk.X, anchor="w")
 
     def bind_keys(self):
+        self.root.bind("<Control-n>", lambda _event: self.open_project_hub())
+        self.root.bind("<Control-o>", lambda _event: self.open_project_dialog())
         self.root.bind("<Control-s>", lambda _event: self.save_labels())
         self.root.bind("<Control-z>", lambda _event: self.undo())
         self.root.bind("<Control-y>", lambda _event: self.redo())
@@ -196,7 +123,8 @@ class Annotator:
         self.root.bind("u", lambda _event: self.next_unreviewed())
         self.root.bind("b", lambda _event: self.set_tool_mode("aabb"))
         self.root.bind("r", lambda _event: self.set_tool_mode("obb"))
-        self.root.bind("<Control-g>", lambda _event: self.jump_to_image())
+        self.root.bind("<Control-g>", lambda _event: self.jump_dialog())
+        self.root.bind("<F1>", lambda _event: self.show_controls())
         self.root.bind("<Escape>", lambda _event: self.clear_selection())
         self.root.bind("<Delete>", lambda _event: self.delete_selected())
         for idx in range(min(9, len(self.classes))):
@@ -312,22 +240,6 @@ class Annotator:
         suffix = f" | {status}" if status else ""
         text = f"{self.index + 1}/{len(self.images)}  {path.name}  boxes={len(self.boxes)}  save_dir={self.label_dir}{suffix}"
         self.info.config(text=text)
-
-    def update_list(self):
-        self.box_list.delete(0, tk.END)
-        for idx, box in enumerate(self.boxes):
-            name = self.classes[box["cls"]]
-            if box.get("kind", "aabb") == "obb":
-                center_x = round(sum(point[0] for point in box["points"]) / 4)
-                center_y = round(sum(point[1] for point in box["points"]) / 4)
-                self.box_list.insert(tk.END, f"{idx + 1}. ◇ {name}  center=[{center_x},{center_y}]")
-            else:
-                x1, y1, x2, y2 = [round(box[k]) for k in ("x1", "y1", "x2", "y2")]
-                self.box_list.insert(tk.END, f"{idx + 1}. □ {name}  [{x1},{y1},{x2},{y2}]")
-        if self.selected is not None and 0 <= self.selected < len(self.boxes):
-            self.box_list.selection_clear(0, tk.END)
-            self.box_list.selection_set(self.selected)
-            self.box_list.see(self.selected)
 
     def redraw(self):
         self.canvas.delete("all")
@@ -694,13 +606,6 @@ class Annotator:
     def open_project_hub(self):
         subprocess.Popen([sys.executable, "-m", "yolo_annotator_desktop", "--hub"])
 
-    def toggle_more(self):
-        self.more_visible = not self.more_visible
-        if self.more_visible:
-            self.more_panel.pack(fill=tk.X, pady=(6, 2))
-        else:
-            self.more_panel.pack_forget()
-
     def set_selected_class(self):
         if self.selected is None or not (0 <= self.selected < len(self.boxes)):
             self.update_info("no selected box")
@@ -852,21 +757,285 @@ class Annotator:
                 return
         self.update_info("all images reviewed")
 
-    def jump_to_image(self):
+    def build_menu(self):
+        menubar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="新建或导入数据集...", command=self.open_project_hub, accelerator="Ctrl+N")
+        file_menu.add_command(label="打开项目...", command=self.open_project_dialog, accelerator="Ctrl+O")
+        file_menu.add_separator()
+        file_menu.add_command(label="打开图片目录", command=lambda: self.open_path(self.image_dir))
+        file_menu.add_command(label="打开标签目录", command=lambda: self.open_path(self.label_dir))
+        file_menu.add_command(label="打开类别文件", command=lambda: self.open_path(self.classes_path))
+        file_menu.add_separator()
+        file_menu.add_command(label="保存", command=self.save_labels, accelerator="Ctrl+S")
+        file_menu.add_command(label="退出", command=self.root.destroy)
+        menubar.add_cascade(label="文件", menu=file_menu)
+
+        edit_menu = tk.Menu(menubar, tearoff=False)
+        edit_menu.add_command(label="撤销", command=self.undo, accelerator="Ctrl+Z")
+        edit_menu.add_command(label="重做", command=self.redo, accelerator="Ctrl+Y")
+        edit_menu.add_separator()
+        edit_menu.add_command(label="设置选中框类别", command=self.set_selected_class, accelerator="C")
+        edit_menu.add_command(label="删除选中框", command=self.delete_selected, accelerator="Delete")
+        edit_menu.add_command(label="删除本图全部框", command=self.delete_all)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="管理类别...", command=self.manage_classes)
+        menubar.add_cascade(label="编辑", menu=edit_menu)
+
+        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu.add_command(label="隐藏或显示标签", command=self.toggle_labels, accelerator="H")
+        view_menu.add_command(label="重置缩放与平移", command=self.reset_view)
+        view_menu.add_separator()
+        view_menu.add_command(label="上一张", command=self.prev_image, accelerator="A / Left")
+        view_menu.add_command(label="下一张", command=self.next_image, accelerator="D / Right")
+        view_menu.add_command(label="下一张未审核", command=self.next_unreviewed, accelerator="U")
+        view_menu.add_command(label="跳转到图片...", command=self.jump_dialog, accelerator="Ctrl+G")
+        menubar.add_cascade(label="视图", menu=view_menu)
+
+        annotation_menu = tk.Menu(menubar, tearoff=False)
+        annotation_menu.add_radiobutton(
+            label="普通矩形框",
+            variable=self.tool_mode,
+            value="aabb",
+            command=lambda: self.set_tool_mode("aabb"),
+            accelerator="B",
+        )
+        annotation_menu.add_radiobutton(
+            label="三点式旋转框",
+            variable=self.tool_mode,
+            value="obb",
+            command=lambda: self.set_tool_mode("obb"),
+            accelerator="R",
+        )
+        annotation_menu.add_separator()
+        annotation_menu.add_command(label="添加自定义类别...", command=self.add_class)
+        annotation_menu.add_command(label="管理类别...", command=self.manage_classes)
+        menubar.add_cascade(label="标注", menu=annotation_menu)
+
+        dataset_menu = tk.Menu(menubar, tearoff=False)
+        dataset_menu.add_command(label="质量检查...", command=self.run_quality_check)
+        dataset_menu.add_command(label="导出 YOLO 数据集...", command=self.export_dataset)
+        dataset_menu.add_separator()
+        dataset_menu.add_command(label="打开项目与数据集中心", command=self.open_project_hub)
+        menubar.add_cascade(label="数据集", menu=dataset_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="操作说明", command=self.show_controls, accelerator="F1")
+        help_menu.add_command(label="关于", command=self.show_about)
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        self.root.config(menu=menubar)
+
+    def build_ui(self):
+        top = tk.Frame(self.root, bd=1, relief=tk.GROOVE)
+        top.pack(side=tk.TOP, fill=tk.X, padx=6, pady=5)
+
+        self.add_toolbar_button(top, "folder", "打开项目 (Ctrl+O)", self.open_project_dialog)
+        self.add_toolbar_button(top, "save", "保存标签 (Ctrl+S)", self.save_labels)
+        self.add_toolbar_separator(top)
+        self.add_toolbar_button(top, "rect", "普通矩形框 (B)", lambda: self.set_tool_mode("aabb"), "aabb")
+        self.add_toolbar_button(top, "obb", "三点式旋转框 (R)", lambda: self.set_tool_mode("obb"), "obb")
+        self.add_toolbar_separator(top)
+        self.add_toolbar_button(top, "undo", "撤销 (Ctrl+Z)", self.undo)
+        self.add_toolbar_button(top, "redo", "重做 (Ctrl+Y)", self.redo)
+        self.add_toolbar_button(top, "eye_off", "隐藏或显示标签 (H)", self.toggle_labels)
+        self.add_toolbar_separator(top)
+        self.add_toolbar_button(top, "previous", "上一张 (A / 左方向键)", self.prev_image)
+        self.add_toolbar_button(top, "next", "下一张 (D / 右方向键)", self.next_image)
+        self.add_toolbar_button(top, "next_unreviewed", "下一张未审核 (U)", self.next_unreviewed)
+
+        body = tk.Frame(self.root)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, minsize=240)
+
+        self.canvas = tk.Canvas(body, bg="#151515", highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.bind("<ButtonPress-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<ButtonPress-3>", self.on_right_press)
+        self.canvas.bind("<B3-Motion>", self.on_right_drag)
+        self.canvas.bind("<ButtonRelease-3>", self.on_right_release)
+        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.canvas.bind("<Configure>", lambda _event: self.redraw())
+
+        panel = tk.Frame(body, width=240)
+        panel.grid(row=0, column=1, sticky="ns", padx=8, pady=4)
+        panel.pack_propagate(False)
+        self.panel = panel
+
+        class_header = tk.Frame(panel)
+        class_header.pack(fill=tk.X)
+        tk.Label(class_header, text="类别").pack(side=tk.LEFT, anchor="w")
+        self.add_toolbar_button(class_header, "add", "添加自定义类别", self.add_class, padx=(8, 2))
+        self.add_toolbar_button(class_header, "manage", "管理、重命名、删除或调整类别顺序", self.manage_classes)
+        self.class_frame = tk.Frame(panel)
+        self.class_frame.pack(fill=tk.X)
+        self.refresh_class_controls()
+
+        tk.Label(panel, text="标注框").pack(anchor="w", pady=(12, 2))
+        self.box_list = tk.Listbox(panel, height=16)
+        self.box_list.pack(fill=tk.BOTH, expand=True)
+        self.box_list.bind("<<ListboxSelect>>", self.on_select_box)
+
+        box_actions = tk.Frame(panel)
+        box_actions.pack(fill=tk.X, pady=(6, 2))
+        self.add_toolbar_button(box_actions, "tag", "将选中框设置为当前类别 (C)", self.set_selected_class)
+        self.add_toolbar_button(box_actions, "trash", "删除选中框 (Delete)", self.delete_selected)
+        self.add_toolbar_button(box_actions, "deselect", "取消选择 (Esc)", self.clear_selection)
+
+        tk.Label(
+            panel,
+            text="普通框 B | 旋转框 R | 滚轮缩放 | 右键拖动画面",
+            justify=tk.LEFT,
+            fg="#666666",
+            wraplength=230,
+        ).pack(anchor="w", pady=(8, 4))
+
+        self.info = tk.Label(self.root, text="", anchor="w", bd=1, relief=tk.SUNKEN, padx=6)
+        self.info.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def add_toolbar_button(self, parent, icon, tooltip, command, mode=None, padx=2):
+        options = {}
+        if mode is not None:
+            options = {"variable": self.tool_mode, "value": mode}
+        button = icon_button(parent, self.icons.get(icon), tooltip, command, **options)
+        button.pack(side=tk.LEFT, padx=padx, pady=2)
+        return button
+
+    @staticmethod
+    def add_toolbar_separator(parent):
+        tk.Frame(parent, width=1, bg="#bbbbbb").pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=4)
+
+    def update_list(self):
+        self.box_list.delete(0, tk.END)
+        for idx, box in enumerate(self.boxes):
+            name = self.classes[box["cls"]]
+            if box.get("kind", "aabb") == "obb":
+                center_x = round(sum(point[0] for point in box["points"]) / 4)
+                center_y = round(sum(point[1] for point in box["points"]) / 4)
+                self.box_list.insert(tk.END, f"{idx + 1}. ◇ {name}  center=[{center_x},{center_y}]")
+            else:
+                x1, y1, x2, y2 = [round(box[key]) for key in ("x1", "y1", "x2", "y2")]
+                self.box_list.insert(tk.END, f"{idx + 1}. □ {name}  [{x1},{y1},{x2},{y2}]")
+        if self.selected is not None and 0 <= self.selected < len(self.boxes):
+            self.box_list.selection_clear(0, tk.END)
+            self.box_list.selection_set(self.selected)
+            self.box_list.see(self.selected)
+
+    def project_config(self):
+        from .project import ProjectConfig
+
+        return ProjectConfig(
+            name=self.image_dir.name,
+            images=str(self.image_dir),
+            labels=str(self.label_dir),
+            classes=str(self.classes_path),
+            keep_empty=self.keep_empty,
+            annotation_mode=self.annotation_mode,
+        )
+
+    def open_project_dialog(self):
+        from .project import load_project
+
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="打开 YOLO Annotator Desktop 项目",
+            filetypes=[("YAD 项目", "*.yad.json"), ("JSON 文件", "*.json"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            project = load_project(path)
+            errors = project.validate()
+            if errors:
+                raise ValueError("\n".join(errors))
+            subprocess.Popen([sys.executable, "-m", "yolo_annotator_desktop", "--project", path])
+        except Exception as exc:
+            messagebox.showerror("打开项目失败", str(exc), parent=self.root)
+
+    def open_path(self, path):
+        target = str(Path(path).resolve())
+        try:
+            if sys.platform == "win32":
+                os.startfile(target)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", target])
+            else:
+                subprocess.Popen(["xdg-open", target])
+        except Exception as exc:
+            messagebox.showerror("无法打开", str(exc), parent=self.root)
+
+    def run_quality_check(self):
+        from .qc import inspect_project
+
+        report = inspect_project(self.project_config())
+        text = (
+            f"图片：{report['images']}\n"
+            f"已标注：{report['labeled_images']}\n"
+            f"已审核空图：{report['empty_reviewed_images']}\n"
+            f"未审核：{report['unreviewed_images']}\n"
+            f"标注框：{report['boxes']}\n"
+            f"格式：{report['format_counts']}\n"
+            f"问题：{report['issue_count']}"
+        )
+        messagebox.showinfo("质量检查", text, parent=self.root)
+
+    def export_dataset(self):
+        from .qc import export_yolo_dataset
+
+        output = filedialog.askdirectory(parent=self.root, title="选择 YOLO 数据集导出目录")
+        if not output:
+            return
+        try:
+            result = export_yolo_dataset(self.project_config(), Path(output))
+            messagebox.showinfo(
+                "导出完成",
+                f"训练集图片：{result['train']}\n验证集图片：{result['val']}\n目录：{result['output']}",
+                parent=self.root,
+            )
+        except Exception as exc:
+            messagebox.showerror("导出失败", str(exc), parent=self.root)
+
+    def jump_dialog(self):
         if not self.images:
             return
-        raw = self.jump_value.get().strip()
-        try:
-            target = int(raw) - 1
-        except ValueError:
-            self.update_info("enter an image number")
-            return
-        if not 0 <= target < len(self.images):
-            self.update_info(f"image number must be 1-{len(self.images)}")
+        target = simpledialog.askinteger(
+            "跳转到图片",
+            f"输入图片序号（1-{len(self.images)}）：",
+            parent=self.root,
+            minvalue=1,
+            maxvalue=len(self.images),
+            initialvalue=self.index + 1,
+        )
+        if target is None:
             return
         self.save_labels(silent=True)
-        self.index = target
+        self.index = target - 1
         self.load_current()
+
+    def show_controls(self):
+        messagebox.showinfo(
+            "操作说明",
+            "左键拖动：画普通框或旋转框基线\n"
+            "左键单击框：选中最小的框\n"
+            "滚轮：以鼠标位置为中心缩放\n"
+            "右键拖动：平移画面\n"
+            "B / R：切换普通框与三点式旋转框\n"
+            "Ctrl+Z / Ctrl+Y：撤销 / 重做\n"
+            "A / D：上一张 / 下一张",
+            parent=self.root,
+        )
+
+    def show_about(self):
+        messagebox.showinfo(
+            "关于",
+            "YOLO Annotator Desktop\n本地优先、可开源的 YOLO 数据集标注工具",
+            parent=self.root,
+        )
 
 
 def main():
