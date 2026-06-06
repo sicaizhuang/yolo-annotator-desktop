@@ -1,9 +1,14 @@
 import argparse
+import copy
+import math
 from pathlib import Path
+import subprocess
+import sys
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 from PIL import Image, ImageTk
+from .widgets import icon_button
 
 
 PROJECT = Path.cwd()
@@ -21,10 +26,12 @@ class Annotator:
         keep_empty: bool = False,
         order_file: Path | None = None,
         filter_order: bool = False,
+        annotation_mode: str = "detect",
     ):
         self.root = root
         self.image_dir = image_dir
         self.label_dir = label_dir
+        self.classes_path = classes_path
         self.classes = [line.strip() for line in classes_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.keep_empty = keep_empty
         self.images = self.find_images(image_dir, order_file, filter_order)
@@ -34,6 +41,11 @@ class Annotator:
         self.undo_stack = []
         self.redo_stack = []
         self.labels_visible = True
+        self.annotation_mode = annotation_mode
+        self.tool_mode = tk.StringVar(value="obb" if annotation_mode == "obb" else "aabb")
+        self.more_visible = False
+        self.obb_baseline = None
+        self.obb_preview = None
         self.drag_start = None
         self.press_box_index = None
         self.resize_handle = None
@@ -54,8 +66,10 @@ class Annotator:
 
         self.label_dir.mkdir(parents=True, exist_ok=True)
         self.root.title(f"YOLO Annotator Desktop - {image_dir.name}")
-        self.root.geometry("1220x860")
-        self.root.minsize(900, 650)
+        window_width = min(820, max(760, self.root.winfo_screenwidth() - 300))
+        window_height = min(700, max(600, self.root.winfo_screenheight() - 260))
+        self.root.geometry(f"{window_width}x{window_height}+20+20")
+        self.root.minsize(760, 600)
 
         self.build_ui()
         self.bind_keys()
@@ -86,25 +100,33 @@ class Annotator:
         return images
 
     def build_ui(self):
-        top = tk.Frame(self.root)
-        top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
+        top = tk.Frame(self.root, bd=1, relief=tk.GROOVE)
+        top.pack(side=tk.TOP, fill=tk.X, padx=6, pady=5)
 
-        self.info = tk.Label(top, text="", anchor="w")
-        self.info.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        tk.Button(top, text="Prev (A)", command=self.prev_image).pack(side=tk.LEFT, padx=3)
-        tk.Button(top, text="Save (Ctrl+S)", command=self.save_labels).pack(side=tk.LEFT, padx=3)
-        tk.Button(top, text="Next (D)", command=self.next_image).pack(side=tk.LEFT, padx=3)
-        tk.Button(top, text="Next Unreviewed (U)", command=self.next_unreviewed).pack(side=tk.LEFT, padx=3)
+        icon_button(top, "□", "Axis-aligned rectangle (B)", lambda: self.set_tool_mode("aabb"), variable=self.tool_mode, value="aabb").pack(side=tk.LEFT, padx=2, pady=2)
+        icon_button(top, "↔", "Three-point rotated rectangle / YOLO OBB (R)", lambda: self.set_tool_mode("obb"), variable=self.tool_mode, value="obb").pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Frame(top, width=1, bg="#bbbbbb").pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=4)
+        icon_button(top, "↶", "Undo (Ctrl+Z)", self.undo).pack(side=tk.LEFT, padx=2, pady=2)
+        icon_button(top, "↷", "Redo (Ctrl+Y)", self.redo).pack(side=tk.LEFT, padx=2, pady=2)
+        icon_button(top, "⊘", "Hide or show label text (H)", self.toggle_labels).pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Frame(top, width=1, bg="#bbbbbb").pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=4)
+        icon_button(top, "‹", "Previous image (A / Left)", self.prev_image).pack(side=tk.LEFT, padx=2, pady=2)
+        icon_button(top, "›", "Next image (D / Right)", self.next_image).pack(side=tk.LEFT, padx=2, pady=2)
+        icon_button(top, "U", "Next unreviewed image", self.next_unreviewed).pack(side=tk.LEFT, padx=2, pady=2)
+        icon_button(top, "S", "Save labels (Ctrl+S)", self.save_labels).pack(side=tk.LEFT, padx=2, pady=2)
         self.jump_value = tk.StringVar()
-        tk.Entry(top, width=6, textvariable=self.jump_value).pack(side=tk.LEFT, padx=(10, 2))
-        tk.Button(top, text="Go", command=self.jump_to_image).pack(side=tk.LEFT, padx=2)
+        tk.Entry(top, width=5, textvariable=self.jump_value).pack(side=tk.LEFT, padx=(8, 2), pady=3)
+        icon_button(top, "↵", "Jump to image number (Ctrl+G)", self.jump_to_image).pack(side=tk.LEFT, padx=2, pady=2)
+        icon_button(top, "⋯", "Show or hide less-used actions", self.toggle_more).pack(side=tk.LEFT, padx=3, pady=2)
 
         body = tk.Frame(self.root)
         body.pack(fill=tk.BOTH, expand=True)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, minsize=240)
 
         self.canvas = tk.Canvas(body, bg="#151515", highlightthickness=0)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
@@ -112,47 +134,54 @@ class Annotator:
         self.canvas.bind("<B3-Motion>", self.on_right_drag)
         self.canvas.bind("<ButtonRelease-3>", self.on_right_release)
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
+        self.canvas.bind("<Motion>", self.on_motion)
         self.canvas.bind("<Configure>", lambda _event: self.redraw())
 
-        panel = tk.Frame(body, width=260)
-        panel.pack(side=tk.RIGHT, fill=tk.Y, padx=8, pady=4)
+        panel = tk.Frame(body, width=240)
+        panel.grid(row=0, column=1, sticky="ns", padx=8, pady=4)
         panel.pack_propagate(False)
+        self.panel = panel
 
-        tk.Label(panel, text="Class").pack(anchor="w")
-        for idx, name in enumerate(self.classes):
-            text = f"{idx + 1}. {name}"
-            tk.Radiobutton(panel, text=text, variable=self.current_class, value=idx, anchor="w").pack(fill=tk.X, anchor="w")
+        class_header = tk.Frame(panel)
+        class_header.pack(fill=tk.X)
+        tk.Label(class_header, text="Classes").pack(side=tk.LEFT, anchor="w")
+        icon_button(class_header, "+", "Add a custom class", self.add_class).pack(side=tk.LEFT, padx=(8, 2))
+        icon_button(class_header, "≡", "Manage, rename, delete, or reorder classes", self.manage_classes).pack(side=tk.LEFT, padx=2)
+        self.class_frame = tk.Frame(panel)
+        self.class_frame.pack(fill=tk.X)
+        self.refresh_class_controls()
 
-        tk.Label(panel, text="Boxes").pack(anchor="w", pady=(16, 2))
+        tk.Label(panel, text="Boxes").pack(anchor="w", pady=(12, 2))
         self.box_list = tk.Listbox(panel, height=16)
         self.box_list.pack(fill=tk.BOTH, expand=True)
         self.box_list.bind("<<ListboxSelect>>", self.on_select_box)
 
-        self.toggle_labels_button = tk.Button(panel, text="Hide Labels (H)", command=self.toggle_labels)
-        self.toggle_labels_button.pack(fill=tk.X, pady=(8, 2))
-        tk.Button(panel, text="Undo (Ctrl+Z)", command=self.undo).pack(fill=tk.X, pady=2)
-        tk.Button(panel, text="Redo (Ctrl+Y)", command=self.redo).pack(fill=tk.X, pady=2)
-        tk.Button(panel, text="Set Selected Class (C)", command=self.set_selected_class).pack(fill=tk.X, pady=2)
-        tk.Button(panel, text="Deselect (Esc)", command=self.clear_selection).pack(fill=tk.X, pady=2)
-        tk.Button(panel, text="Delete Selected (Del)", command=self.delete_selected).pack(fill=tk.X, pady=2)
-        tk.Button(panel, text="Delete All Boxes", command=self.delete_all).pack(fill=tk.X, pady=2)
+        box_actions = tk.Frame(panel)
+        box_actions.pack(fill=tk.X, pady=(6, 2))
+        icon_button(box_actions, "C", "Set selected box to current class", self.set_selected_class).pack(side=tk.LEFT, padx=2)
+        icon_button(box_actions, "×", "Delete selected box (Delete)", self.delete_selected).pack(side=tk.LEFT, padx=2)
+        icon_button(box_actions, "Esc", "Deselect box", self.clear_selection, width=4).pack(side=tk.LEFT, padx=2)
 
-        max_key = min(9, len(self.classes))
-        help_text = (
-            "Draw: drag empty area with left mouse\n"
-            "Select: left click box, right click, or list\n"
-            "Reclass: choose class, press C\n"
-            f"Classes: keys 1-{max_key}\n"
-            "Prev/Next: A / D or arrows\n"
-            "Save: Ctrl+S\n"
-            "Undo/Redo: Ctrl+Z / Ctrl+Y\n"
-            "Hide/show label text: H\n"
-            "Zoom: mouse wheel\n"
-            "Pan: drag with right mouse\n"
-            "Resize: select box, drag its handles\n"
-            "Labels save as YOLO txt"
-        )
-        tk.Label(panel, text=help_text, justify=tk.LEFT, fg="#555").pack(anchor="w", pady=12)
+        self.more_panel = tk.Frame(panel, bd=1, relief=tk.GROOVE)
+        self.more_panel.pack(fill=tk.X, pady=(6, 2))
+        tk.Button(self.more_panel, text="Delete all boxes", command=self.delete_all).pack(fill=tk.X, padx=4, pady=2)
+        tk.Button(self.more_panel, text="Reset zoom and pan", command=self.reset_view).pack(fill=tk.X, padx=4, pady=2)
+        tk.Button(self.more_panel, text="Save now", command=self.save_labels).pack(fill=tk.X, padx=4, pady=2)
+        tk.Button(self.more_panel, text="Open project and dataset hub", command=self.open_project_hub).pack(fill=tk.X, padx=4, pady=2)
+        self.more_panel.pack_forget()
+
+        help_text = "□ box   ↔ draw rotated   ◇ saved OBB"
+        tk.Label(panel, text=help_text, justify=tk.LEFT, fg="#666").pack(anchor="w", pady=(8, 4))
+
+        self.info = tk.Label(self.root, text="", anchor="w", bd=1, relief=tk.SUNKEN, padx=6)
+        self.info.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def refresh_class_controls(self):
+        for child in self.class_frame.winfo_children():
+            child.destroy()
+        for idx, name in enumerate(self.classes):
+            text = f"{idx + 1}. {name}"
+            tk.Radiobutton(self.class_frame, text=text, variable=self.current_class, value=idx, anchor="w").pack(fill=tk.X, anchor="w")
 
     def bind_keys(self):
         self.root.bind("<Control-s>", lambda _event: self.save_labels())
@@ -165,6 +194,8 @@ class Annotator:
         self.root.bind("h", lambda _event: self.toggle_labels())
         self.root.bind("c", lambda _event: self.set_selected_class())
         self.root.bind("u", lambda _event: self.next_unreviewed())
+        self.root.bind("b", lambda _event: self.set_tool_mode("aabb"))
+        self.root.bind("r", lambda _event: self.set_tool_mode("obb"))
         self.root.bind("<Control-g>", lambda _event: self.jump_to_image())
         self.root.bind("<Escape>", lambda _event: self.clear_selection())
         self.root.bind("<Delete>", lambda _event: self.delete_selected())
@@ -187,6 +218,7 @@ class Annotator:
         self.selected = None
         self.undo_stack = []
         self.redo_stack = []
+        self.obb_baseline = None
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -202,19 +234,39 @@ class Annotator:
         w, h = self.img.size
         for line in label_path.read_text(encoding="utf-8").splitlines():
             parts = line.strip().split()
-            if len(parts) != 5:
-                continue
             try:
                 cls = int(float(parts[0]))
-                xc, yc, bw, bh = [float(v) for v in parts[1:]]
             except ValueError:
                 continue
-            x1 = (xc - bw / 2) * w
-            y1 = (yc - bh / 2) * h
-            x2 = (xc + bw / 2) * w
-            y2 = (yc + bh / 2) * h
-            if 0 <= cls < len(self.classes):
-                boxes.append({"cls": cls, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+            if not 0 <= cls < len(self.classes):
+                continue
+            if len(parts) == 5:
+                try:
+                    xc, yc, bw, bh = [float(v) for v in parts[1:]]
+                except ValueError:
+                    continue
+                boxes.append(
+                    {
+                        "kind": "aabb",
+                        "cls": cls,
+                        "x1": (xc - bw / 2) * w,
+                        "y1": (yc - bh / 2) * h,
+                        "x2": (xc + bw / 2) * w,
+                        "y2": (yc + bh / 2) * h,
+                    }
+                )
+            elif len(parts) == 9:
+                try:
+                    coords = [float(v) for v in parts[1:]]
+                except ValueError:
+                    continue
+                boxes.append(
+                    {
+                        "kind": "obb",
+                        "cls": cls,
+                        "points": [(coords[idx] * w, coords[idx + 1] * h) for idx in range(0, 8, 2)],
+                    }
+                )
         return boxes
 
     def save_labels(self, silent=False):
@@ -223,6 +275,14 @@ class Annotator:
         w, h = self.img.size
         lines = []
         for box in self.boxes:
+            if box.get("kind", "aabb") == "obb":
+                points = [
+                    (max(0, min(w, x)) / w, max(0, min(h, y)) / h)
+                    for x, y in box["points"]
+                ]
+                flat = " ".join(f"{value:.6f}" for point in points for value in point)
+                lines.append(f"{box['cls']} {flat}")
+                continue
             x1 = max(0, min(w, box["x1"]))
             y1 = max(0, min(h, box["y1"]))
             x2 = max(0, min(w, box["x2"]))
@@ -257,8 +317,13 @@ class Annotator:
         self.box_list.delete(0, tk.END)
         for idx, box in enumerate(self.boxes):
             name = self.classes[box["cls"]]
-            x1, y1, x2, y2 = [round(box[k]) for k in ("x1", "y1", "x2", "y2")]
-            self.box_list.insert(tk.END, f"{idx + 1}. {name}  [{x1},{y1},{x2},{y2}]")
+            if box.get("kind", "aabb") == "obb":
+                center_x = round(sum(point[0] for point in box["points"]) / 4)
+                center_y = round(sum(point[1] for point in box["points"]) / 4)
+                self.box_list.insert(tk.END, f"{idx + 1}. ◇ {name}  center=[{center_x},{center_y}]")
+            else:
+                x1, y1, x2, y2 = [round(box[k]) for k in ("x1", "y1", "x2", "y2")]
+                self.box_list.insert(tk.END, f"{idx + 1}. □ {name}  [{x1},{y1},{x2},{y2}]")
         if self.selected is not None and 0 <= self.selected < len(self.boxes):
             self.box_list.selection_clear(0, tk.END)
             self.box_list.selection_set(self.selected)
@@ -284,6 +349,9 @@ class Annotator:
 
         for idx, box in enumerate(self.boxes):
             self.draw_box(box, selected=(idx == self.selected))
+        if self.obb_baseline is not None and self.obb_preview is not None:
+            points = [self.image_to_canvas(x, y) for x, y in self.obb_preview]
+            self.canvas.create_polygon(*[value for point in points for value in point], outline="#ffffff", fill="", dash=(5, 4), width=2)
 
     def image_to_canvas(self, x, y):
         return self.offset_x + x * self.scale, self.offset_y + y * self.scale
@@ -298,6 +366,19 @@ class Annotator:
 
     def draw_box(self, box, selected=False):
         color = "#ff3030" if selected else COLORS[box["cls"] % len(COLORS)]
+        if box.get("kind", "aabb") == "obb":
+            points = [self.image_to_canvas(x, y) for x, y in box["points"]]
+            flat = [value for point in points for value in point]
+            self.canvas.create_polygon(*flat, outline=color, fill="", width=3 if selected else 2)
+            label_x, label_y = min(points, key=lambda point: (point[1], point[0]))
+            if self.labels_visible:
+                label = self.classes[box["cls"]]
+                self.canvas.create_rectangle(label_x, label_y - 20, label_x + max(90, len(label) * 8), label_y, fill=color, outline=color)
+                self.canvas.create_text(label_x + 4, label_y - 10, anchor=tk.W, fill="#000000", text=label)
+            if selected:
+                for hx, hy in points:
+                    self.canvas.create_oval(hx - 5, hy - 5, hx + 5, hy + 5, fill="#ffffff", outline="#ff3030", width=2)
+            return
         x1, y1 = self.image_to_canvas(box["x1"], box["y1"])
         x2, y2 = self.image_to_canvas(box["x2"], box["y2"])
         self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=3 if selected else 2)
@@ -337,6 +418,8 @@ class Annotator:
     def find_resize_handle(self, canvas_x, canvas_y):
         if self.selected is None or not (0 <= self.selected < len(self.boxes)):
             return None
+        if self.boxes[self.selected].get("kind", "aabb") == "obb":
+            return None
         for name, hx, hy in self.resize_handle_positions(self.boxes[self.selected]):
             if abs(canvas_x - hx) <= 9 and abs(canvas_y - hy) <= 9:
                 return name
@@ -348,6 +431,11 @@ class Annotator:
         tolerance = max(3.0, 5.0 / max(self.scale, 0.01))
         matches = []
         for idx, box in enumerate(self.boxes):
+            if box.get("kind", "aabb") == "obb":
+                if self.point_in_polygon(ix, iy, box["points"]):
+                    area = abs(self.polygon_area(box["points"]))
+                    matches.append((max(1.0, area), idx))
+                continue
             x1 = min(box["x1"], box["x2"]) - tolerance
             y1 = min(box["y1"], box["y2"]) - tolerance
             x2 = max(box["x1"], box["x2"]) + tolerance
@@ -359,6 +447,28 @@ class Annotator:
             return None
         matches.sort()
         return matches[0][1]
+
+    @staticmethod
+    def polygon_area(points):
+        return sum(
+            points[idx][0] * points[(idx + 1) % len(points)][1]
+            - points[(idx + 1) % len(points)][0] * points[idx][1]
+            for idx in range(len(points))
+        ) / 2
+
+    @staticmethod
+    def point_in_polygon(x, y, points):
+        inside = False
+        previous = points[-1]
+        for current in points:
+            x1, y1 = previous
+            x2, y2 = current
+            if (y1 > y) != (y2 > y):
+                crossing_x = (x2 - x1) * (y - y1) / (y2 - y1) + x1
+                if x < crossing_x:
+                    inside = not inside
+            previous = current
+        return inside
 
     def select_box(self, idx, status="selected"):
         if idx is None or not (0 <= idx < len(self.boxes)):
@@ -372,6 +482,19 @@ class Annotator:
 
     def on_press(self, event):
         if self.img is None:
+            return
+        if self.tool_mode.get() == "obb" and self.obb_baseline is not None:
+            points = self.make_obb_points(*self.obb_baseline, self.canvas_to_image(event.x, event.y))
+            if points is not None:
+                self.record_history()
+                self.boxes.append({"kind": "obb", "cls": int(self.current_class.get()), "points": points})
+                self.selected = len(self.boxes) - 1
+                self.obb_baseline = None
+                self.obb_preview = None
+                self.update_list()
+                self.save_labels(silent=True)
+                self.redraw()
+                self.update_info("rotated box auto-saved")
             return
         self.drag_start = self.canvas_to_image(event.x, event.y)
         self.resize_handle = self.find_resize_handle(event.x, event.y)
@@ -410,7 +533,10 @@ class Annotator:
         x2, y2 = self.image_to_canvas(ix2, iy2)
         if self.preview_rect:
             self.canvas.delete(self.preview_rect)
-        self.preview_rect = self.canvas.create_rectangle(x1, y1, x2, y2, outline="#ffffff", dash=(5, 4), width=2)
+        if self.tool_mode.get() == "obb":
+            self.preview_rect = self.canvas.create_line(x1, y1, x2, y2, fill="#ffffff", dash=(5, 4), width=2, arrow=tk.BOTH)
+        else:
+            self.preview_rect = self.canvas.create_rectangle(x1, y1, x2, y2, outline="#ffffff", dash=(5, 4), width=2)
 
     def on_release(self, event):
         if self.drag_start is None:
@@ -439,13 +565,19 @@ class Annotator:
         if press_box_index is not None and not dragged:
             self.select_box(press_box_index)
             return
-        x1, x2 = sorted((x1, x2))
-        y1, y2 = sorted((y1, y2))
         if not dragged:
             self.clear_selection()
             return
+        if self.tool_mode.get() == "obb":
+            self.obb_baseline = ((x1, y1), (x2, y2))
+            self.obb_preview = None
+            self.update_info("move mouse to set width, then click")
+            self.redraw()
+            return
+        x1, x2 = sorted((x1, x2))
+        y1, y2 = sorted((y1, y2))
         self.record_history()
-        self.boxes.append({"cls": int(self.current_class.get()), "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        self.boxes.append({"kind": "aabb", "cls": int(self.current_class.get()), "x1": x1, "y1": y1, "x2": x2, "y2": y2})
         self.selected = len(self.boxes) - 1
         self.update_list()
         self.save_labels(silent=True)
@@ -509,6 +641,66 @@ class Annotator:
         self.pan_y = event.y - anchor_y * new_scale - centered_y
         self.redraw()
 
+    def on_motion(self, event):
+        if self.tool_mode.get() != "obb" or self.obb_baseline is None:
+            return
+        self.obb_preview = self.make_obb_points(*self.obb_baseline, self.canvas_to_image(event.x, event.y))
+        self.redraw()
+
+    @staticmethod
+    def make_obb_points(start, end, cursor):
+        ax, ay = start
+        bx, by = end
+        cx, cy = cursor
+        dx = bx - ax
+        dy = by - ay
+        length = math.hypot(dx, dy)
+        if length < 5:
+            return None
+        nx = -dy / length
+        ny = dx / length
+        distance = (cx - ax) * nx + (cy - ay) * ny
+        if abs(distance) < 3:
+            return None
+        offset = (nx * distance, ny * distance)
+        return [(ax, ay), (bx, by), (bx + offset[0], by + offset[1]), (ax + offset[0], ay + offset[1])]
+
+    def set_tool_mode(self, mode):
+        expected = "obb" if self.annotation_mode == "obb" else "aabb"
+        if mode != expected and self.boxes:
+            label = "YOLO OBB" if mode == "obb" else "standard Detect"
+            if not messagebox.askyesno(
+                "Different annotation type",
+                f"This project is configured for '{self.annotation_mode}' annotations.\n\n"
+                f"Drawing a {label} box will mix annotation formats and block training export. Continue?",
+                parent=self.root,
+            ):
+                self.tool_mode.set(expected)
+                return
+        self.tool_mode.set(mode)
+        self.obb_baseline = None
+        self.obb_preview = None
+        self.drag_start = None
+        self.redraw()
+        warning = " | warning: differs from project annotation type" if mode != expected else ""
+        self.update_info(("rectangle mode" if mode == "aabb" else "three-point rotated rectangle mode") + warning)
+
+    def reset_view(self):
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.redraw()
+
+    def open_project_hub(self):
+        subprocess.Popen([sys.executable, "-m", "yolo_annotator_desktop", "--hub"])
+
+    def toggle_more(self):
+        self.more_visible = not self.more_visible
+        if self.more_visible:
+            self.more_panel.pack(fill=tk.X, pady=(6, 2))
+        else:
+            self.more_panel.pack_forget()
+
     def set_selected_class(self):
         if self.selected is None or not (0 <= self.selected < len(self.boxes)):
             self.update_info("no selected box")
@@ -534,14 +726,14 @@ class Annotator:
         self.update_info("deselected")
 
     def snapshot_boxes(self):
-        return [box.copy() for box in self.boxes]
+        return copy.deepcopy(self.boxes)
 
     def record_history(self):
         self.undo_stack.append(self.snapshot_boxes())
         self.redo_stack.clear()
 
     def restore_boxes(self, boxes, status):
-        self.boxes = [box.copy() for box in boxes]
+        self.boxes = copy.deepcopy(boxes)
         self.selected = None
         self.update_list()
         self.save_labels(silent=True)
@@ -564,10 +756,49 @@ class Annotator:
 
     def toggle_labels(self):
         self.labels_visible = not self.labels_visible
-        text = "Hide Labels (H)" if self.labels_visible else "Show Labels (H)"
-        self.toggle_labels_button.config(text=text)
         self.redraw()
         self.update_info("labels shown" if self.labels_visible else "labels hidden")
+
+    def add_class(self):
+        name = simpledialog.askstring("Add custom class", "New class name:", parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if name in self.classes:
+            messagebox.showinfo("Class exists", f"'{name}' already exists.", parent=self.root)
+            return
+        self.classes.append(name)
+        self.classes_path.write_text("\n".join(self.classes) + "\n", encoding="utf-8")
+        self.current_class.set(len(self.classes) - 1)
+        self.refresh_class_controls()
+        self.update_info(f"added class: {name}")
+
+    def manage_classes(self):
+        from .class_manager import ClassManager
+        from .project import ProjectConfig
+
+        project = ProjectConfig(
+            name=self.image_dir.name,
+            images=str(self.image_dir),
+            labels=str(self.label_dir),
+            classes=str(self.classes_path),
+            annotation_mode=self.annotation_mode,
+        )
+        ClassManager(self.root, project, self.reload_classes)
+
+    def reload_classes(self):
+        self.classes = [
+            line.strip()
+            for line in self.classes_path.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip()
+        ]
+        self.current_class.set(min(self.current_class.get(), max(0, len(self.classes) - 1)))
+        self.refresh_class_controls()
+        self.boxes = self.load_labels()
+        self.selected = None
+        self.update_list()
+        self.redraw()
+        self.update_info("classes reloaded")
 
     def delete_selected(self):
         if self.selected is None:

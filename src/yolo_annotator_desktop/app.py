@@ -10,12 +10,13 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .annotator import Annotator
 from .class_manager import ClassManager
-from .project import ProjectConfig, create_project, load_project
+from .project import ProjectConfig, load_project
+from .project_wizard import ProjectWizard
 from .qc import export_yolo_dataset, inspect_project
 
 
 APP_NAME = "YOLO Annotator Desktop"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 STATE_PATH = Path.home() / ".yolo_annotator_desktop.json"
 
 
@@ -77,6 +78,7 @@ class ProjectHub:
             f"Images: {self.project.image_dir}",
             f"Labels: {self.project.label_dir}",
             f"Classes: {self.project.classes_path}",
+            f"Annotation type: {self.project.annotation_mode}",
             f"Class names ({len(self.project.class_names())}): {', '.join(self.project.class_names())}",
         ]
         if errors:
@@ -118,29 +120,12 @@ class ProjectHub:
             messagebox.showerror("Open project failed", str(exc))
 
     def new_project(self):
-        root = filedialog.askdirectory(title="Choose a folder for the new project")
-        if not root:
-            return
-        name = simpledialog.askstring("Project name", "Project name:", initialvalue=Path(root).name)
-        if name is None:
-            return
-        classes_text = simpledialog.askstring(
-            "Classes",
-            "Enter class names separated by commas:",
-            initialvalue="object",
-        )
-        if classes_text is None:
-            return
-        classes = [item.strip() for item in classes_text.split(",") if item.strip()]
-        if not classes:
-            messagebox.showerror("Invalid classes", "At least one class is required.")
-            return
-        try:
-            self.project = create_project(root, name, classes)
-            self.remember_project()
-            self.refresh_summary("Project created. Put images into the images folder, then open the annotator.")
-        except Exception as exc:
-            messagebox.showerror("Create project failed", str(exc))
+        ProjectWizard(self.root, self.project_created)
+
+    def project_created(self, project):
+        self.project = project
+        self.remember_project()
+        self.refresh_summary("Project created or imported. Open the annotator to begin.")
 
     def require_project(self) -> bool:
         if self.project is None:
@@ -164,6 +149,7 @@ class ProjectHub:
             keep_empty=self.project.keep_empty,
             order_file=self.project.order_path,
             filter_order=self.project.filter_order,
+            annotation_mode=self.project.annotation_mode,
         )
 
     def manage_classes(self):
@@ -187,6 +173,7 @@ class ProjectHub:
             f"Reviewed empty: {report['empty_reviewed_images']}\n"
             f"Unreviewed: {report['unreviewed_images']}\n"
             f"Boxes: {report['boxes']}\n"
+            f"Formats: {report['format_counts']}\n"
             f"Issues: {report['issue_count']}\n"
             f"Class counts: {report['class_counts']}"
         )
@@ -219,7 +206,25 @@ class ProjectHub:
             subprocess.Popen(["xdg-open", folder])
 
 
-def run(project_path: str = ""):
+def run(project_path: str = "", hub: bool = False):
     root = tk.Tk()
-    ProjectHub(root, project_path)
+    if project_path and not hub:
+        project = load_project(project_path)
+        errors = project.validate()
+        if errors:
+            messagebox.showerror("Project is not ready", "\n".join(errors))
+            root.destroy()
+            return
+        Annotator(
+            root,
+            project.image_dir,
+            project.label_dir,
+            project.classes_path,
+            keep_empty=project.keep_empty,
+            order_file=project.order_path,
+            filter_order=project.filter_order,
+            annotation_mode=project.annotation_mode,
+        )
+    else:
+        ProjectHub(root, project_path)
     root.mainloop()

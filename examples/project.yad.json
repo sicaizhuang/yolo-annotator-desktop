@@ -6,5 +6,6 @@
   "keep_empty": true,
   "order_file": "",
   "filter_order": false,
+  "annotation_mode": "detect",
   "version": 1
 }

@@ -12,6 +12,8 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :error
 )
 
+".venv\Scripts\python.exe" -m pip install -e . --disable-pip-version-check >nul
+if errorlevel 1 goto :error
 ".venv\Scripts\python.exe" -m yolo_annotator_desktop %*
 exit /b %errorlevel%
 
