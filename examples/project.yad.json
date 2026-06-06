@@ -1,0 +1,10 @@
+{
+  "name": "example",
+  "images": "images",
+  "labels": "labels",
+  "classes": "classes.txt",
+  "keep_empty": true,
+  "order_file": "",
+  "filter_order": false,
+  "version": 1
+}

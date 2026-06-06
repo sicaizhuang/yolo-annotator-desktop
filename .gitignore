@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+*.log
+*_qc_report.json
+.idea/
+.vscode/
+projects/
+run_ocg_project.cmd
