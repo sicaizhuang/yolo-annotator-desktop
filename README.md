@@ -1,10 +1,59 @@
 # YOLO Annotator Desktop
 
-A fast, local-first desktop annotator for YOLO datasets.
+Desktop YOLO annotation tool for object detection, oriented bounding boxes
+(OBB), segmentation, pose keypoints, and image classification datasets.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](pyproject.toml)
+[![YOLO formats](https://img.shields.io/badge/YOLO-detect%20%7C%20OBB%20%7C%20segment%20%7C%20pose%20%7C%20classify-orange.svg)](#supported-yolo-tasks)
+
+[简体中文](README_zh-CN.md) | [Documentation site](https://sicaizhuang.github.io/yolo-annotator-desktop/)
+
+YOLO Annotator Desktop is a fast, local-first image labeling app for building
+YOLO datasets without Docker, a browser service, an account, or uploading
+private images. It supports YOLO TXT import/export, `data.yaml` project import,
+COCO/VOC helpers, quality checks, class remapping, autosave, undo/redo, and
+project backups.
 
 It grew out of a real electronic-component sorting project where annotation speed,
 safe autosave, precise box editing, and offline operation mattered more than a
 large web platform.
+
+## Why Use It
+
+- Local desktop workflow for private datasets and offline labeling.
+- One app for YOLO detection, OBB, segmentation, pose, and classification.
+- Simple project wrapper around ordinary image folders, label folders, and class files.
+- Built-in quality checks before sending data to training.
+- Safer editing: atomic saves, backups, undo/redo, and preserved malformed rows.
+
+## Supported YOLO Tasks
+
+| Task | Label shape | Status |
+|---|---|---|
+| Detection | `class x_center y_center width height` | Supported |
+| OBB / rotated boxes | `class x1 y1 x2 y2 x3 y3 x4 y4` | Supported |
+| Segmentation | `class x1 y1 x2 y2 ...` polygon rows | Supported |
+| Pose | box plus keypoints and `kpt_shape` export | Supported |
+| Classification | image-level class folders on export | Supported |
+
+## Install
+
+From a release wheel:
+
+```powershell
+py -m pip install yolo_annotator_desktop-0.5.0-py3-none-any.whl
+yolo-annotator-desktop
+```
+
+From source:
+
+```powershell
+git clone https://github.com/sicaizhuang/yolo-annotator-desktop.git
+cd yolo-annotator-desktop
+py -m pip install -e .
+yolo-annotator-desktop
+```
 
 ## Features
 
@@ -169,6 +218,13 @@ py -m unittest discover -s tests -v
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
+
+## Search Keywords
+
+YOLO annotation tool, YOLO labeling tool, YOLO dataset editor, bounding box
+annotation, rotated bounding box annotation, OBB labeling, image segmentation
+annotation, pose keypoint annotation, classification dataset tool, COCO to YOLO,
+Pascal VOC to YOLO, Ultralytics YOLO dataset, local image annotation.
 
 ## License
 
