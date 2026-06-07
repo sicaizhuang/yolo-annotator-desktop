@@ -7,6 +7,7 @@ from PIL import Image
 
 from yolo_annotator_desktop.annotator import Annotator, natural_sort_key, process_is_running
 from yolo_annotator_desktop.formats import export_coco, export_pascal_voc
+from yolo_annotator_desktop.presets import load_classes_file, parse_class_text
 from yolo_annotator_desktop.project import (
     create_project,
     create_project_from_coco,
@@ -136,6 +137,46 @@ class ProjectAndQCTests(unittest.TestCase):
         self.assertEqual(imported.class_names(), ["cat", "dog"])
         self.assertEqual(imported.image_dir, (dataset / "images" / "train").resolve())
         self.assertEqual(imported.label_dir, (dataset / "labels" / "train").resolve())
+
+    def test_import_yolo_yaml_image_list_split(self):
+        dataset = self.root / "list_dataset"
+        (dataset / "images" / "train").mkdir(parents=True)
+        (dataset / "labels" / "train").mkdir(parents=True)
+        for name in ("a.jpg", "b.jpg"):
+            Image.new("RGB", (20, 20), "white").save(dataset / "images" / "train" / name)
+        (dataset / "labels" / "train" / "a.txt").write_text("0 0.5 0.5 0.4 0.4\n", encoding="utf-8")
+        (dataset / "train.txt").write_text("images/train/a.jpg\nimages/train/b.jpg\n", encoding="utf-8")
+        (dataset / "data.yaml").write_text(
+            "path: .\ntrain: train.txt\nnames: [part]\n",
+            encoding="utf-8",
+        )
+        imported = create_project_from_yolo_yaml(self.root / "list_import", dataset / "data.yaml", "train")
+        self.assertEqual(imported.image_dir, (dataset / "images").resolve())
+        self.assertEqual(imported.label_dir, (dataset / "labels").resolve())
+        self.assertTrue(imported.filter_order)
+        self.assertEqual(imported.order_path.read_text(encoding="utf-8").splitlines(), ["train/a.jpg", "train/b.jpg"])
+        self.assertEqual(inspect_project(imported)["images"], 2)
+
+    def test_import_yolo_yaml_multi_directory_split(self):
+        dataset = self.root / "multi_dataset"
+        for folder in ("batch_a", "batch_b"):
+            (dataset / "images" / folder).mkdir(parents=True)
+            (dataset / "labels" / folder).mkdir(parents=True)
+            Image.new("RGB", (20, 20), "white").save(dataset / "images" / folder / f"{folder}.jpg")
+        (dataset / "data.yaml").write_text(
+            "path: .\ntrain:\n  - images/batch_a\n  - images/batch_b\nnames:\n  0: part\n",
+            encoding="utf-8",
+        )
+        imported = create_project_from_yolo_yaml(self.root / "multi_import", dataset / "data.yaml", "train")
+        self.assertEqual(imported.image_dir, (dataset / "images").resolve())
+        self.assertEqual(imported.label_dir, (dataset / "labels").resolve())
+        self.assertEqual(inspect_project(imported)["images"], 2)
+
+    def test_class_helpers_accept_common_inputs(self):
+        self.assertEqual(parse_class_text("cat, dog\n# comment\nbird"), ["cat", "dog", "bird"])
+        classes_file = self.root / "classes.names"
+        classes_file.write_text("widget\npart\n", encoding="utf-8")
+        self.assertEqual(load_classes_file(classes_file), ["widget", "part"])
 
     def test_nested_images_use_mirrored_labels_and_export(self):
         nested_image = self.project.image_dir / "batch_a" / "nested.jpg"

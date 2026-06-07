@@ -11,11 +11,14 @@ import yaml
 
 from PIL import Image
 
+from .presets import names_from_yolo_payload
 from .safe_io import atomic_write_json, atomic_write_text
 
 
 PROJECT_SUFFIX = ".yad.json"
 CURRENT_PROJECT_VERSION = 1
+SUPPORTED_ANNOTATION_MODES = {"detect", "obb"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 
 @dataclass
@@ -69,7 +72,7 @@ class ProjectConfig:
         errors = []
         if not self.name.strip():
             errors.append("Project name is empty.")
-        if self.annotation_mode not in {"detect", "obb"}:
+        if self.annotation_mode not in SUPPORTED_ANNOTATION_MODES:
             errors.append(f"Unsupported annotation mode: {self.annotation_mode}")
         if not self.image_dir.is_dir():
             errors.append(f"Image directory does not exist: {self.image_dir}")
@@ -162,6 +165,8 @@ def ensure_new_project_workspace(root: str | Path) -> Path:
 
 
 def create_project(root: str | Path, name: str, classes: list[str], annotation_mode: str = "detect") -> ProjectConfig:
+    if annotation_mode not in SUPPORTED_ANNOTATION_MODES:
+        raise ValueError(f"Unsupported annotation mode: {annotation_mode}")
     root_path = ensure_new_project_workspace(root)
     image_dir = root_path / "images"
     label_dir = root_path / "labels"
@@ -189,6 +194,8 @@ def create_project_from_folders(
     classes: list[str],
     annotation_mode: str = "detect",
 ) -> ProjectConfig:
+    if annotation_mode not in SUPPORTED_ANNOTATION_MODES:
+        raise ValueError(f"Unsupported annotation mode: {annotation_mode}")
     workspace_path = ensure_new_project_workspace(workspace)
     workspace_path.mkdir(parents=True, exist_ok=True)
     labels = Path(label_dir).resolve()
@@ -215,39 +222,127 @@ def create_project_from_yolo_yaml(
 ) -> ProjectConfig:
     yaml_file = Path(yaml_path).resolve()
     data = yaml.safe_load(yaml_file.read_text(encoding="utf-8-sig")) or {}
+    if not isinstance(data, dict):
+        raise ValueError("YOLO YAML must contain a mapping.")
     root_value = data.get("path", yaml_file.parent)
     dataset_root = Path(root_value)
     if not dataset_root.is_absolute():
         dataset_root = (yaml_file.parent / dataset_root).resolve()
     split_value = data.get(split)
-    if isinstance(split_value, list):
-        if len(split_value) != 1:
-            raise ValueError("This version can open one image directory per project. Choose a YAML split with one directory.")
-        split_value = split_value[0]
     if not split_value:
         raise ValueError(f"The YAML file has no '{split}' split.")
-    image_dir = Path(split_value)
-    if not image_dir.is_absolute():
-        image_dir = (dataset_root / image_dir).resolve()
-    if image_dir.is_file():
-        raise ValueError("Image-list TXT splits are not supported yet. Use a split that points to an image directory.")
+    names = names_from_yolo_payload(data)
 
+    split_items = split_value if isinstance(split_value, list) else [split_value]
+    resolved_items = [_resolve_yolo_path(item, dataset_root, yaml_file.parent) for item in split_items]
+
+    if len(resolved_items) == 1 and resolved_items[0].is_dir():
+        image_dir = resolved_items[0]
+        return create_project_from_folders(
+            workspace,
+            f"{yaml_file.stem}-{split}",
+            image_dir,
+            _infer_yolo_label_root(image_dir),
+            names,
+            annotation_mode,
+        )
+
+    image_paths: list[Path] = []
+    for item in resolved_items:
+        if item.is_dir():
+            image_paths.extend(_find_images(item))
+        elif item.is_file():
+            image_paths.extend(_read_yolo_image_list(item, dataset_root, yaml_file.parent))
+        else:
+            raise ValueError(f"YOLO split path does not exist: {item}")
+    image_paths = sorted(dict.fromkeys(path.resolve() for path in image_paths))
+    if not image_paths:
+        raise ValueError(f"The YAML '{split}' split contains no supported images.")
+
+    image_root = _choose_image_root(image_paths)
+    project = create_project_from_folders(
+        workspace,
+        f"{yaml_file.stem}-{split}",
+        image_root,
+        _infer_yolo_label_root(image_root),
+        names,
+        annotation_mode,
+    )
+    order_path = project.config_path.parent / f"{split}_order.txt"
+    order_lines = []
+    for image in image_paths:
+        try:
+            order_lines.append(image.relative_to(image_root).as_posix())
+        except ValueError:
+            order_lines.append(image.as_posix())
+    atomic_write_text(order_path, "\n".join(order_lines) + "\n")
+    project.order_file = order_path.name
+    project.filter_order = True
+    project.save()
+    return project
+
+
+def _resolve_yolo_path(value: str | Path, dataset_root: Path, yaml_dir: Path) -> Path:
+    candidate = Path(str(value)).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    for root in (dataset_root, yaml_dir):
+        resolved = (root / candidate).resolve()
+        if resolved.exists():
+            return resolved
+    return (dataset_root / candidate).resolve()
+
+
+def _find_images(root: Path) -> list[Path]:
+    return [path for path in sorted(root.rglob("*")) if path.is_file() and path.suffix.lower() in IMAGE_EXTS]
+
+
+def _read_yolo_image_list(list_file: Path, dataset_root: Path, yaml_dir: Path) -> list[Path]:
+    images: list[Path] = []
+    for raw_line in list_file.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip().strip('"').strip("'")
+        if not line or line.startswith("#"):
+            continue
+        candidate = Path(line).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+        else:
+            probes = [
+                (dataset_root / candidate).resolve(),
+                (list_file.parent / candidate).resolve(),
+                (yaml_dir / candidate).resolve(),
+            ]
+            resolved = next((probe for probe in probes if probe.exists()), probes[0])
+        if resolved.suffix.lower() in IMAGE_EXTS:
+            images.append(resolved)
+    missing = [path for path in images if not path.exists()]
+    if missing:
+        preview = "\n".join(str(path) for path in missing[:10])
+        raise ValueError(f"YOLO image list contains missing images:\n{preview}")
+    return images
+
+
+def _choose_image_root(image_paths: list[Path]) -> Path:
+    images = [path.resolve() for path in image_paths]
+    image_roots = []
+    for image in images:
+        parts_lower = [part.lower() for part in image.parts]
+        if "images" in parts_lower:
+            idx = len(parts_lower) - 1 - parts_lower[::-1].index("images")
+            image_roots.append(Path(*image.parts[: idx + 1]))
+    if image_roots and len({root.resolve() for root in image_roots}) == 1:
+        return image_roots[0].resolve()
+    return Path(os.path.commonpath([str(path.parent) for path in images])).resolve()
+
+
+def _infer_yolo_label_root(image_dir: Path) -> Path:
     parts = list(image_dir.parts)
-    if "images" in parts:
-        idx = len(parts) - 1 - parts[::-1].index("images")
+    lowered = [part.lower() for part in parts]
+    if "images" in lowered:
+        idx = len(lowered) - 1 - lowered[::-1].index("images")
         parts[idx] = "labels"
-        label_dir = Path(*parts)
-    else:
-        label_dir = image_dir.parent / "labels" / image_dir.name
-
-    raw_names = data.get("names", [])
-    if isinstance(raw_names, dict):
-        names = [str(raw_names[key]) for key in sorted(raw_names, key=lambda value: int(value))]
-    else:
-        names = [str(name) for name in raw_names]
-    if not names:
-        raise ValueError("The YAML file does not contain class names.")
-    return create_project_from_folders(workspace, f"{yaml_file.stem}-{split}", image_dir, label_dir, names, annotation_mode)
+        return Path(*parts)
+    return image_dir.parent / "labels" / image_dir.name
 
 
 def create_project_from_coco(
@@ -256,7 +351,7 @@ def create_project_from_coco(
     image_dir: str | Path,
     annotation_mode: str = "detect",
 ) -> ProjectConfig:
-    if annotation_mode not in {"detect", "obb"}:
+    if annotation_mode not in SUPPORTED_ANNOTATION_MODES:
         raise ValueError(f"Unsupported annotation mode: {annotation_mode}")
     source = Path(coco_json).resolve()
     images_root = Path(image_dir).resolve()

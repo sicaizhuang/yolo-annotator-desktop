@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 - 2026-06-07
+
+- Added built-in class presets for single-object, COCO 80, Pascal VOC 20, electronics starter, and defect-detection starter projects.
+- Added class loading from `classes.txt`, `.names`, and YOLO `data.yaml` files in the project wizard.
+- Reworked the dataset wizard as a more general import hub with clearer source choices and task-mode settings.
+- Added YOLO `data.yaml` support for image-list TXT splits such as `train: train.txt`.
+- Added YOLO `data.yaml` support for split lists with multiple image directories or image-list files.
+- Added `yad-create` for scriptable project creation from empty workspaces, folders, class presets/files, or YOLO YAML.
+- Added tests for class helpers, image-list YAML imports, and multi-directory YAML imports.
+
 ## 0.4.0 - 2026-06-07
 
 - Redesigned the project hub around review progress, dataset metrics, recent projects, and common actions.

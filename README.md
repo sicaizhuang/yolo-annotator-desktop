@@ -16,6 +16,9 @@ large web platform.
 - Malformed label rows are preserved during editing instead of silently discarded.
 - Portable `.yad.json` projects and nested image/label directory support.
 - Create or import projects from folders, YOLO `data.yaml`, COCO JSON, and Pascal VOC XML.
+- YOLO YAML imports support directory splits, image-list TXT splits, and multi-directory split lists.
+- Built-in class presets include single-object, COCO 80, Pascal VOC 20, electronics starter, and defect-detection starter classes.
+- Classes can be typed manually or loaded from `classes.txt`, `.names`, or YOLO `data.yaml`.
 - Export YOLO train/validation datasets, COCO JSON, or Pascal VOC XML.
 - Quality checks cover corrupt images, invalid geometry/classes, mixed formats, duplicate boxes/images, orphan labels, and unused classes.
 - Blocking errors and non-blocking warnings are reported separately.
@@ -42,6 +45,19 @@ Open a project directly:
 
 ```powershell
 .\.venv\Scripts\python.exe -m yolo_annotator_desktop path\to\project.yad.json
+```
+
+Create a project from the command line:
+
+```powershell
+# Empty managed dataset with COCO classes
+.\.venv\Scripts\yad-create.exe D:\datasets\my_project --preset "COCO 80"
+
+# Existing image and label folders
+.\.venv\Scripts\yad-create.exe D:\datasets\wrapped --images D:\data\images --labels D:\data\labels --classes-file D:\data\classes.txt
+
+# YOLO data.yaml, including train.txt image lists and multi-directory splits
+.\.venv\Scripts\yad-create.exe D:\datasets\from_yaml --yolo-yaml D:\data\data.yaml --split train
 ```
 
 ## Project Format
@@ -76,6 +92,23 @@ Rotated rectangles use standard YOLO OBB format:
 ```text
 class_id x1 y1 x2 y2 x3 y3 x4 y4
 ```
+
+## Import Sources
+
+The app always creates or opens a `.yad.json` project wrapper, but the source can
+be many things:
+
+- Empty managed workspace.
+- Existing image folder, with optional existing labels.
+- YOLO `data.yaml` with `train`, `val`, or `test` pointing to one directory.
+- YOLO `data.yaml` where a split points to an image-list TXT file.
+- YOLO `data.yaml` where a split is a list of directories and/or image-list TXT files.
+- COCO JSON plus an image root.
+- Pascal VOC XML folder plus an image root.
+
+When importing external data, source images are kept in place. For image-list
+and multi-directory YAML splits, the project writes a small local order file so
+only the selected split is shown.
 
 ## Controls
 

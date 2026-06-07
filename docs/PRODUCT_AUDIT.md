@@ -23,6 +23,17 @@ labeling loop fast, predictable, recoverable, and easy to learn.
 - COCO/VOC import and export, COCO OBB round trips, TIFF images, and direct
   project-file startup.
 
+## Resolved In 0.4.1
+
+- Added class presets and class-file loading so new users can start common
+  dataset types without manually typing dozens of categories.
+- Reworked the project wizard into a clearer import hub with explicit source
+  choices and annotation-mode selection.
+- Added YOLO YAML support for image-list TXT splits and multi-directory split
+  lists, both of which are common in real training repositories.
+- Added a `yad-create` command so project creation can be scripted in notebooks,
+  CI jobs, or team handoff packages.
+
 ## Remaining Risks And Roadmap
 
 - The annotation window is intentionally lightweight but remains a large Tk
