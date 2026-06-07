@@ -209,6 +209,8 @@ class ProjectHub:
             f"标注类型：{self.project.annotation_mode}",
             f"类别（{len(self.project.class_names())}）：{', '.join(self.project.class_names())}",
         ]
+        if self.project.annotation_mode == "pose":
+            lines.append(f"关键点（{len(self.project.keypoint_names())}）：{', '.join(self.project.keypoint_names()) or '未配置'}")
         if errors:
             lines += ["", "配置问题：", *[f"- {item}" for item in errors]]
         elif report and report["issues"]:
@@ -347,6 +349,7 @@ def run(project_path: str = "", hub: bool = False):
             order_file=project.order_path,
             filter_order=project.filter_order,
             annotation_mode=project.annotation_mode,
+            keypoint_names=project.keypoint_names(),
             project_name=project.name,
             project_path=project.config_path,
         )

@@ -9,6 +9,7 @@ import shutil
 
 from PIL import Image, UnidentifiedImageError
 
+from .label_formats import infer_label_mode, parse_label_line
 from .project import ProjectConfig
 from .safe_io import atomic_write_text
 
@@ -26,6 +27,9 @@ EXPORT_BLOCKING_ISSUES = {
     "box_outside_image",
     "obb_point_outside_image",
     "degenerate_obb",
+    "degenerate_polygon",
+    "invalid_keypoint_bounds",
+    "invalid_keypoint_visibility",
     "duplicate_label_target",
     "exact_duplicate_box",
 }
@@ -97,48 +101,35 @@ def inspect_project(project: ProjectConfig, verify_images: bool = True) -> dict:
             continue
         labeled += 1
         seen_boxes = set()
+        image_size = None
+        if verify_images:
+            try:
+                with Image.open(image) as source:
+                    image_size = source.size
+            except (OSError, UnidentifiedImageError):
+                image_size = None
         for line_number, line in enumerate(text.splitlines(), 1):
             parts = line.split()
-            if len(parts) not in (5, 9):
-                issues.append({"type": "invalid_columns", "file": str(label), "line": line_number, "detail": line})
+            detected_mode = infer_label_mode(parts, project.annotation_mode)
+            parsed, error = parse_label_line(
+                line,
+                mode=project.annotation_mode,
+                class_count=len(classes),
+                image_size=image_size,
+            )
+            if parsed is None:
+                issues.append({"type": error or "invalid_columns", "file": str(label), "line": line_number, "detail": line})
+                if detected_mode:
+                    format_counts[detected_mode] += 1
                 continue
-            try:
-                class_id = int(float(parts[0]))
-                coords = list(map(float, parts[1:]))
-            except ValueError:
-                issues.append({"type": "invalid_number", "file": str(label), "line": line_number, "detail": line})
-                continue
-            if class_id < 0 or class_id >= len(classes):
-                issues.append({"type": "invalid_class", "file": str(label), "line": line_number, "detail": class_id})
-                continue
-            duplicate_key = (class_id, *(round(value, 8) for value in coords))
+            class_id = parsed["cls"]
+            duplicate_key = (project.annotation_mode, *(parts))
             if duplicate_key in seen_boxes:
                 issues.append({"type": "exact_duplicate_box", "file": str(label), "line": line_number, "detail": line})
                 continue
             seen_boxes.add(duplicate_key)
             class_counts[classes[class_id]] += 1
-            if len(parts) == 5:
-                format_counts["detect"] += 1
-                xc, yc, width, height = coords
-                if not (0 <= xc <= 1 and 0 <= yc <= 1 and 0 < width <= 1 and 0 < height <= 1):
-                    issues.append({"type": "invalid_bounds", "file": str(label), "line": line_number, "detail": line})
-                if xc - width / 2 < -1e-6 or yc - height / 2 < -1e-6 or xc + width / 2 > 1 + 1e-6 or yc + height / 2 > 1 + 1e-6:
-                    issues.append({"type": "box_outside_image", "file": str(label), "line": line_number, "detail": line})
-            else:
-                format_counts["obb"] += 1
-                if any(value < 0 or value > 1 for value in coords):
-                    issues.append({"type": "obb_point_outside_image", "file": str(label), "line": line_number, "detail": line})
-                points = list(zip(coords[::2], coords[1::2]))
-                area = abs(
-                    sum(
-                        points[idx][0] * points[(idx + 1) % len(points)][1]
-                        - points[(idx + 1) % len(points)][0] * points[idx][1]
-                        for idx in range(len(points))
-                    )
-                    / 2
-                )
-                if area <= 1e-8:
-                    issues.append({"type": "degenerate_obb", "file": str(label), "line": line_number, "detail": line})
+            format_counts[project.annotation_mode] += 1
 
     valid_label_paths = {
         project.label_path_for(image).resolve()
@@ -249,6 +240,9 @@ def export_yolo_dataset(project: ProjectConfig, output: Path, val_ratio: float =
     val_count = max(1, min(len(images) - 1, round(len(images) * val_ratio))) if len(images) > 1 else 0
     val_images = {path.resolve() for path in images[:val_count]}
 
+    if project.annotation_mode == "classify":
+        return _export_yolo_classification(project, output, images, val_images, source_report)
+
     for split in ("train", "val"):
         (output / "images" / split).mkdir(parents=True, exist_ok=True)
         (output / "labels" / split).mkdir(parents=True, exist_ok=True)
@@ -278,7 +272,41 @@ def export_yolo_dataset(project: ProjectConfig, output: Path, val_ratio: float =
         "names:",
         *[f"  {idx}: {json.dumps(name, ensure_ascii=False)}" for idx, name in enumerate(names)],
     ]
+    if project.annotation_mode == "pose":
+        keypoints = project.keypoint_names()
+        if keypoints:
+            yaml_lines.insert(-1 - len(names), f"kpt_shape: [{len(keypoints)}, 3]")
     atomic_write_text(output / "data.yaml", "\n".join(yaml_lines) + "\n")
+    atomic_write_text(
+        output / "source_qc_report.json",
+        json.dumps(source_report, ensure_ascii=False, indent=2) + "\n",
+    )
+    return {"train": copied["train"], "val": copied["val"], "output": str(output)}
+
+
+def _export_yolo_classification(project: ProjectConfig, output: Path, images: list[Path], val_images: set[Path], source_report: dict) -> dict:
+    names = project.class_names()
+    copied = Counter()
+    for image in images:
+        label = project.label_path_for(image)
+        class_id = None
+        if label.exists():
+            text = label.read_text(encoding="utf-8-sig").strip()
+            if text:
+                parsed, _error = parse_label_line(text.splitlines()[0], mode="classify", class_count=len(names))
+                if parsed is not None:
+                    class_id = parsed["cls"]
+        if class_id is None:
+            continue
+        split = "val" if image.resolve() in val_images else "train"
+        try:
+            relative = image.relative_to(project.image_dir)
+        except ValueError:
+            relative = Path(image.name)
+        target = output / split / names[class_id] / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image, target)
+        copied[split] += 1
     atomic_write_text(
         output / "source_qc_report.json",
         json.dumps(source_report, ensure_ascii=False, indent=2) + "\n",

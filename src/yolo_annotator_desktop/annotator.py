@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 import uuid
 
 from PIL import Image, ImageTk
+from .label_formats import parse_label_line, serialize_annotation
 from .project import label_path_for_image
 from .safe_io import atomic_write_text
 from .state import load_state, save_state
@@ -103,6 +104,7 @@ class Annotator:
         order_file: Path | None = None,
         filter_order: bool = False,
         annotation_mode: str = "detect",
+        keypoint_names: list[str] | None = None,
         project_name: str = "",
         project_path: Path | None = None,
     ):
@@ -139,13 +141,17 @@ class Annotator:
         )
         self.labels_visible = True
         self.annotation_mode = annotation_mode
-        self.tool_mode = tk.StringVar(value="obb" if annotation_mode == "obb" else "aabb")
+        self.keypoint_names = keypoint_names or []
+        self.tool_mode = tk.StringVar(value=self.default_tool_for_mode(annotation_mode))
         self.image_filter = tk.StringVar(value="全部")
         self.image_search = tk.StringVar()
         self.class_search = tk.StringVar()
         self.visible_class_ids = []
         self.obb_baseline = None
         self.obb_preview = None
+        self.polygon_points = []
+        self.polygon_preview = None
+        self.pose_next_keypoint = 0
         self.drag_start = None
         self.press_box_index = None
         self.resize_handle = None
@@ -286,6 +292,9 @@ class Annotator:
         self.root.bind("v", self.shortcut(lambda: self.set_tool_mode("select")))
         self.root.bind("b", self.shortcut(lambda: self.set_tool_mode("aabb")))
         self.root.bind("r", self.shortcut(lambda: self.set_tool_mode("obb")))
+        self.root.bind("p", self.shortcut(lambda: self.set_tool_mode("polygon")))
+        self.root.bind("k", self.shortcut(lambda: self.set_tool_mode("keypoint")))
+        self.root.bind("<Return>", self.shortcut(self.finish_polygon))
         self.root.bind("f", self.shortcut(self.reset_view))
         self.root.bind("<Control-g>", self.shortcut(self.jump_dialog))
         self.root.bind("<Control-Key-0>", self.shortcut(self.reset_view))
@@ -428,6 +437,9 @@ class Annotator:
         self.undo_stack = []
         self.redo_stack = []
         self.obb_baseline = None
+        self.polygon_points = []
+        self.polygon_preview = None
+        self.pose_next_keypoint = 0
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -442,66 +454,17 @@ class Annotator:
         if not label_path.exists() or self.img is None:
             return []
         boxes = []
-        w, h = self.img.size
         for line in label_path.read_text(encoding="utf-8-sig").splitlines():
-            parts = line.strip().split()
-            if len(parts) not in (5, 9):
+            parsed, _error = parse_label_line(
+                line,
+                mode=getattr(self, "annotation_mode", "detect"),
+                class_count=len(self.classes),
+                image_size=self.img.size,
+            )
+            if parsed is None:
                 self.preserved_label_lines.append(line)
                 continue
-            try:
-                cls = int(float(parts[0]))
-            except (ValueError, OverflowError):
-                self.preserved_label_lines.append(line)
-                continue
-            if not 0 <= cls < len(self.classes):
-                self.preserved_label_lines.append(line)
-                continue
-            if len(parts) == 5:
-                try:
-                    xc, yc, bw, bh = [float(v) for v in parts[1:]]
-                except (ValueError, OverflowError):
-                    self.preserved_label_lines.append(line)
-                    continue
-                if (
-                    not all(math.isfinite(value) for value in (xc, yc, bw, bh))
-                    or not (0 <= xc <= 1 and 0 <= yc <= 1 and 0 < bw <= 1 and 0 < bh <= 1)
-                    or xc - bw / 2 < 0
-                    or yc - bh / 2 < 0
-                    or xc + bw / 2 > 1
-                    or yc + bh / 2 > 1
-                ):
-                    self.preserved_label_lines.append(line)
-                    continue
-                boxes.append(
-                    {
-                        "kind": "aabb",
-                        "cls": cls,
-                        "x1": (xc - bw / 2) * w,
-                        "y1": (yc - bh / 2) * h,
-                        "x2": (xc + bw / 2) * w,
-                        "y2": (yc + bh / 2) * h,
-                    }
-                )
-            elif len(parts) == 9:
-                try:
-                    coords = [float(v) for v in parts[1:]]
-                except (ValueError, OverflowError):
-                    self.preserved_label_lines.append(line)
-                    continue
-                points = [(coords[idx] * w, coords[idx + 1] * h) for idx in range(0, 8, 2)]
-                if (
-                    not all(math.isfinite(value) and 0 <= value <= 1 for value in coords)
-                    or abs(self.polygon_area(points)) <= 1e-6
-                ):
-                    self.preserved_label_lines.append(line)
-                    continue
-                boxes.append(
-                    {
-                        "kind": "obb",
-                        "cls": cls,
-                        "points": points,
-                    }
-                )
+            boxes.append(parsed)
         return boxes
 
     def save_labels(self, silent=False):
@@ -509,25 +472,13 @@ class Annotator:
             return
         if self.dirty:
             self.backup_current_label()
-        w, h = self.img.size
+        size = self.img.size
         lines = []
+        keypoint_count = len(getattr(self, "keypoint_names", []))
         for box in self.boxes:
-            if box.get("kind", "aabb") == "obb":
-                points = [(x / w, y / h) for x, y in box["points"]]
-                flat = " ".join(f"{value:.6f}" for point in points for value in point)
-                lines.append(f"{box['cls']} {flat}")
-                continue
-            x1 = max(0, min(w, box["x1"]))
-            y1 = max(0, min(h, box["y1"]))
-            x2 = max(0, min(w, box["x2"]))
-            y2 = max(0, min(h, box["y2"]))
-            if x2 <= x1 or y2 <= y1:
-                continue
-            xc = ((x1 + x2) / 2) / w
-            yc = ((y1 + y2) / 2) / h
-            bw = (x2 - x1) / w
-            bh = (y2 - y1) / h
-            lines.append(f"{box['cls']} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
+            line = serialize_annotation(box, size, expected_keypoints=keypoint_count)
+            if line:
+                lines.append(line)
         lines.extend(self.preserved_label_lines)
         label_path = self.current_label_path()
         if lines:
@@ -608,6 +559,15 @@ class Annotator:
         if self.obb_baseline is not None and self.obb_preview is not None:
             points = [self.image_to_canvas(x, y) for x, y in self.obb_preview]
             self.canvas.create_polygon(*[value for point in points for value in point], outline="#ffffff", fill="", dash=(5, 4), width=2)
+        if self.polygon_points:
+            points = [self.image_to_canvas(x, y) for x, y in self.polygon_points]
+            if self.polygon_preview is not None:
+                points.append(self.image_to_canvas(*self.polygon_preview))
+            flat = [value for point in points for value in point]
+            if len(points) >= 2:
+                self.canvas.create_line(*flat, fill="#ffffff", dash=(5, 4), width=2)
+            for hx, hy in [self.image_to_canvas(x, y) for x, y in self.polygon_points]:
+                self.canvas.create_oval(hx - 4, hy - 4, hx + 4, hy + 4, fill="#ffffff", outline="#222222")
 
     def image_to_canvas(self, x, y):
         return self.offset_x + x * self.scale, self.offset_y + y * self.scale
@@ -622,6 +582,21 @@ class Annotator:
 
     def draw_box(self, box, selected=False):
         color = "#ff3030" if selected else self.color_for_class(box["cls"])
+        if box.get("kind") == "classify":
+            if self.labels_visible:
+                self.draw_label(8, 8, f"Image: {self.classes[box['cls']]}", color)
+            return
+        if box.get("kind") == "polygon":
+            points = [self.image_to_canvas(x, y) for x, y in box["points"]]
+            flat = [value for point in points for value in point]
+            self.canvas.create_polygon(*flat, outline=color, fill="", width=3 if selected else 2)
+            if self.labels_visible and points:
+                label_x, label_y = min(points, key=lambda point: (point[1], point[0]))
+                self.draw_label(label_x, label_y, self.classes[box["cls"]], color)
+            if selected:
+                for hx, hy in points:
+                    self.canvas.create_oval(hx - 5, hy - 5, hx + 5, hy + 5, fill="#ffffff", outline="#ff3030", width=2)
+            return
         if box.get("kind", "aabb") == "obb":
             points = [self.image_to_canvas(x, y) for x, y in box["points"]]
             flat = [value for point in points for value in point]
@@ -650,6 +625,16 @@ class Annotator:
                     outline="#ff3030",
                     width=2,
                 )
+        if box.get("kind") == "pose":
+            for idx, (kx, ky, visible) in enumerate(box.get("keypoints", [])):
+                if not visible:
+                    continue
+                cx, cy = self.image_to_canvas(kx, ky)
+                radius = 5 if selected else 4
+                self.canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill="#ffffff", outline=color, width=2)
+                if self.labels_visible:
+                    name = self.keypoint_names[idx] if idx < len(self.keypoint_names) else str(idx + 1)
+                    self.canvas.create_text(cx + 7, cy - 7, text=name, fill=color, anchor=tk.SW)
 
     def draw_label(self, x, y, text, background):
         above = y >= 24
@@ -717,12 +702,27 @@ class Annotator:
         if self.selected is None or not (0 <= self.selected < len(self.boxes)):
             return None
         selected_box = self.boxes[self.selected]
+        if selected_box.get("kind") == "classify":
+            return None
         if selected_box.get("kind", "aabb") == "obb":
             for idx, point in enumerate(selected_box["points"]):
                 hx, hy = self.image_to_canvas(*point)
                 if abs(canvas_x - hx) <= 9 and abs(canvas_y - hy) <= 9:
                     return f"obb:{idx}"
             return None
+        if selected_box.get("kind") == "polygon":
+            for idx, point in enumerate(selected_box["points"]):
+                hx, hy = self.image_to_canvas(*point)
+                if abs(canvas_x - hx) <= 9 and abs(canvas_y - hy) <= 9:
+                    return f"polygon:{idx}"
+            return None
+        if selected_box.get("kind") == "pose":
+            for idx, (kx, ky, visible) in enumerate(selected_box.get("keypoints", [])):
+                if not visible:
+                    continue
+                hx, hy = self.image_to_canvas(kx, ky)
+                if abs(canvas_x - hx) <= 9 and abs(canvas_y - hy) <= 9:
+                    return f"keypoint:{idx}"
         for name, hx, hy in self.resize_handle_positions(selected_box):
             if abs(canvas_x - hx) <= 9 and abs(canvas_y - hy) <= 9:
                 return name
@@ -734,6 +734,13 @@ class Annotator:
         tolerance = max(3.0, 5.0 / max(self.scale, 0.01))
         matches = []
         for idx, box in enumerate(self.boxes):
+            if box.get("kind") == "classify":
+                continue
+            if box.get("kind") == "polygon":
+                if self.point_in_polygon(ix, iy, box["points"]):
+                    area = abs(self.polygon_area(box["points"]))
+                    matches.append((max(1.0, area), idx))
+                continue
             if box.get("kind", "aabb") == "obb":
                 if self.point_in_polygon(ix, iy, box["points"]):
                     area = abs(self.polygon_area(box["points"]))
@@ -785,6 +792,21 @@ class Annotator:
 
     def on_press(self, event):
         if self.img is None:
+            return
+        if self.tool_mode.get() == "polygon":
+            ix, iy = self.canvas_to_image(event.x, event.y)
+            if len(self.polygon_points) >= 3:
+                first_x, first_y = self.polygon_points[0]
+                if math.hypot(ix - first_x, iy - first_y) <= max(8.0, 10.0 / max(self.scale, 0.01)):
+                    self.finish_polygon()
+                    return
+            self.polygon_points.append((ix, iy))
+            self.polygon_preview = None
+            self.update_info("Polygon point added. Press Enter or click the first point to finish.")
+            self.redraw()
+            return
+        if self.tool_mode.get() == "keypoint":
+            self.place_pose_keypoint(*self.canvas_to_image(event.x, event.y))
             return
         if self.tool_mode.get() == "obb" and self.obb_baseline is not None:
             points = self.make_obb_points(*self.obb_baseline, self.canvas_to_image(event.x, event.y))
@@ -853,6 +875,31 @@ class Annotator:
                     for x, y in box["points"]
                 ):
                     box["points"] = previous_points
+                self.update_list()
+                self.redraw()
+                return
+            if handle.startswith("polygon:"):
+                point_index = int(handle.split(":", 1)[1])
+                previous_points = copy.deepcopy(box["points"])
+                box["points"][point_index] = (ix, iy)
+                if self.img and (
+                    ix < 0
+                    or iy < 0
+                    or ix > self.img.width
+                    or iy > self.img.height
+                    or abs(self.polygon_area(box["points"])) <= 1e-6
+                ):
+                    box["points"] = previous_points
+                self.update_list()
+                self.redraw()
+                return
+            if handle.startswith("keypoint:"):
+                point_index = int(handle.split(":", 1)[1])
+                keypoints = list(box.get("keypoints", []))
+                if 0 <= point_index < len(keypoints):
+                    _old_x, _old_y, visible = keypoints[point_index]
+                    keypoints[point_index] = (ix, iy, visible or 2)
+                    box["keypoints"] = keypoints
                 self.update_list()
                 self.redraw()
                 return
@@ -926,7 +973,11 @@ class Annotator:
         x1, x2 = sorted((x1, x2))
         y1, y2 = sorted((y1, y2))
         self.record_history()
-        self.boxes.append({"kind": "aabb", "cls": int(self.current_class.get()), "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        kind = "pose" if self.annotation_mode == "pose" else "aabb"
+        box = {"kind": kind, "cls": int(self.current_class.get()), "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        if kind == "pose":
+            box["keypoints"] = [(0.0, 0.0, 0) for _idx in range(len(self.keypoint_names))]
+        self.boxes.append(box)
         self.selected = len(self.boxes) - 1
         self.update_list()
         self.autosave_labels()
@@ -995,10 +1046,58 @@ class Annotator:
         self.on_mouse_wheel(event)
 
     def on_motion(self, event):
+        if self.tool_mode.get() == "polygon" and self.polygon_points:
+            self.polygon_preview = self.canvas_to_image(event.x, event.y)
+            self.redraw()
+            return
         if self.tool_mode.get() != "obb" or self.obb_baseline is None:
             return
         self.obb_preview = self.make_obb_points(*self.obb_baseline, self.canvas_to_image(event.x, event.y))
         self.redraw()
+
+    def finish_polygon(self):
+        if self.tool_mode.get() != "polygon" or not self.polygon_points:
+            return
+        if len(self.polygon_points) < 3:
+            self.polygon_points = []
+            self.polygon_preview = None
+            self.redraw()
+            self.update_info("Polygon cancelled: at least 3 points are required.")
+            return
+        if abs(self.polygon_area(self.polygon_points)) <= 1e-6:
+            self.update_info("Polygon is degenerate; move points before finishing.")
+            return
+        self.record_history()
+        self.boxes.append({"kind": "polygon", "cls": int(self.current_class.get()), "points": list(self.polygon_points)})
+        self.selected = len(self.boxes) - 1
+        self.polygon_points = []
+        self.polygon_preview = None
+        self.update_list()
+        self.autosave_labels("auto-saved")
+        self.redraw()
+
+    def place_pose_keypoint(self, ix, iy):
+        if self.selected is None or not (0 <= self.selected < len(self.boxes)):
+            self.update_info("Select a pose box before placing keypoints.")
+            return
+        box = self.boxes[self.selected]
+        if box.get("kind") != "pose":
+            self.update_info("Selected annotation is not a pose object.")
+            return
+        self.record_history()
+        keypoints = list(box.get("keypoints", []))
+        target_count = max(len(self.keypoint_names), len(keypoints), 1)
+        while len(keypoints) < target_count:
+            keypoints.append((0.0, 0.0, 0))
+        index = self.pose_next_keypoint % target_count
+        keypoints[index] = (ix, iy, 2)
+        box["keypoints"] = keypoints
+        self.pose_next_keypoint = (index + 1) % target_count
+        self.update_list()
+        self.autosave_labels("auto-saved")
+        self.redraw()
+        name = self.keypoint_names[index] if index < len(self.keypoint_names) else f"keypoint_{index + 1}"
+        self.update_info(f"Placed {name}")
 
     @staticmethod
     def make_obb_points(start, end, cursor):
@@ -1047,9 +1146,16 @@ class Annotator:
             points[idx] = value
 
     def set_tool_mode(self, mode):
-        expected = "obb" if self.annotation_mode == "obb" else "aabb"
-        if mode not in {"select", expected} and self.boxes:
-            label = "YOLO OBB" if mode == "obb" else "YOLO Detect"
+        expected = self.default_tool_for_mode(self.annotation_mode)
+        allowed = self.allowed_tools_for_mode(self.annotation_mode)
+        if mode not in allowed and self.boxes:
+            label = {
+                "aabb": "YOLO Detect",
+                "obb": "YOLO OBB",
+                "polygon": "YOLO Segmentation",
+                "keypoint": "YOLO Pose keypoints",
+                "select": "Select",
+            }.get(mode, mode)
             if not messagebox.askyesno(
                 "标注类型不同",
                 f"当前项目配置为 {self.annotation_mode} 标注。\n\n"
@@ -1063,15 +1169,43 @@ class Annotator:
             self.canvas.config(cursor="arrow" if mode == "select" else "crosshair")
         self.obb_baseline = None
         self.obb_preview = None
+        if mode != "polygon":
+            self.polygon_points = []
+            self.polygon_preview = None
         self.drag_start = None
         self.move_box_origin = None
         self.redraw()
         if mode == "select":
             self.update_info("select and move mode")
             return
-        base = STATUS_TEXT["rectangle mode" if mode == "aabb" else "three-point rotated rectangle mode"]
-        warning = " | 提醒：与项目标注类型不同" if mode != expected else ""
+        base = {
+            "aabb": STATUS_TEXT["rectangle mode"],
+            "obb": STATUS_TEXT["three-point rotated rectangle mode"],
+            "polygon": "Polygon segmentation mode",
+            "keypoint": "Pose keypoint mode",
+        }.get(mode, mode)
+        warning = " | Warning: tool differs from project task" if mode not in allowed else ""
         self.update_info(base + warning)
+
+    @staticmethod
+    def default_tool_for_mode(mode):
+        return {
+            "detect": "aabb",
+            "obb": "obb",
+            "segment": "polygon",
+            "pose": "aabb",
+            "classify": "select",
+        }.get(mode, "aabb")
+
+    @staticmethod
+    def allowed_tools_for_mode(mode):
+        return {
+            "detect": {"select", "aabb"},
+            "obb": {"select", "obb"},
+            "segment": {"select", "polygon"},
+            "pose": {"select", "aabb", "keypoint"},
+            "classify": {"select"},
+        }.get(mode, {"select", "aabb"})
 
     def reset_view(self):
         self.zoom = 1.0
@@ -1096,6 +1230,14 @@ class Annotator:
         subprocess.Popen([sys.executable, "-m", "yolo_annotator_desktop", "--hub"])
 
     def set_selected_class(self):
+        if self.annotation_mode == "classify":
+            self.record_history()
+            self.boxes = [{"kind": "classify", "cls": int(self.current_class.get())}]
+            self.selected = 0
+            self.update_list()
+            self.autosave_labels("class changed")
+            self.redraw()
+            return
         if self.selected is None or not (0 <= self.selected < len(self.boxes)):
             self.update_info("no selected box")
             return
@@ -1122,8 +1264,10 @@ class Annotator:
         shifted = copy.deepcopy(box)
         if self.img is None:
             return shifted
+        if shifted.get("kind") == "classify":
+            return shifted
         width, height = self.img.size
-        if shifted.get("kind", "aabb") == "obb":
+        if shifted.get("kind") in {"obb", "polygon"}:
             min_x = min(point[0] for point in shifted["points"])
             max_x = max(point[0] for point in shifted["points"])
             min_y = min(point[1] for point in shifted["points"])
@@ -1133,13 +1277,18 @@ class Annotator:
             min_y, max_y = shifted["y1"], shifted["y2"]
         dx = max(-min_x, min(width - max_x, dx))
         dy = max(-min_y, min(height - max_y, dy))
-        if shifted.get("kind", "aabb") == "obb":
+        if shifted.get("kind") in {"obb", "polygon"}:
             shifted["points"] = [(x + dx, y + dy) for x, y in shifted["points"]]
         else:
             for key in ("x1", "x2"):
                 shifted[key] += dx
             for key in ("y1", "y2"):
                 shifted[key] += dy
+            if shifted.get("kind") == "pose":
+                shifted["keypoints"] = [
+                    (x + dx, y + dy, visible) if visible else (x, y, visible)
+                    for x, y, visible in shifted.get("keypoints", [])
+                ]
         return shifted
 
     def handle_arrow(self, dx, dy):
@@ -1186,13 +1335,19 @@ class Annotator:
             return scaled
         scale_x = self.img.width / source_size[0]
         scale_y = self.img.height / source_size[1]
-        if scaled.get("kind", "aabb") == "obb":
+        if scaled.get("kind") in {"obb", "polygon"}:
             scaled["points"] = [(x * scale_x, y * scale_y) for x, y in scaled["points"]]
         else:
-            scaled["x1"] *= scale_x
-            scaled["x2"] *= scale_x
-            scaled["y1"] *= scale_y
-            scaled["y2"] *= scale_y
+            if scaled.get("kind") != "classify":
+                scaled["x1"] *= scale_x
+                scaled["x2"] *= scale_x
+                scaled["y1"] *= scale_y
+                scaled["y2"] *= scale_y
+            if scaled.get("kind") == "pose":
+                scaled["keypoints"] = [
+                    (x * scale_x, y * scale_y, visible) if visible else (x, y, visible)
+                    for x, y, visible in scaled.get("keypoints", [])
+                ]
         return scaled
 
     def mark_reviewed_empty(self):
@@ -1428,6 +1583,20 @@ class Annotator:
             command=lambda: self.set_tool_mode("obb"),
             accelerator="R",
         )
+        annotation_menu.add_radiobutton(
+            label="Polygon segmentation",
+            variable=self.tool_mode,
+            value="polygon",
+            command=lambda: self.set_tool_mode("polygon"),
+            accelerator="P",
+        )
+        annotation_menu.add_radiobutton(
+            label="Pose keypoint",
+            variable=self.tool_mode,
+            value="keypoint",
+            command=lambda: self.set_tool_mode("keypoint"),
+            accelerator="K",
+        )
         annotation_menu.add_separator()
         annotation_menu.add_command(label="标记为空图并完成审核", command=self.mark_reviewed_empty, accelerator="N")
         annotation_menu.add_separator()
@@ -1489,6 +1658,8 @@ class Annotator:
         self.add_toolbar_button(top, "select", "选择和移动标注框 (V)", lambda: self.set_tool_mode("select"), "select")
         self.add_toolbar_button(top, "rect", "普通矩形框 (B)", lambda: self.set_tool_mode("aabb"), "aabb")
         self.add_toolbar_button(top, "obb", "三点式旋转框 (R)", lambda: self.set_tool_mode("obb"), "obb")
+        self.add_toolbar_button(top, "polygon", "多边形分割 (P)", lambda: self.set_tool_mode("polygon"), "polygon")
+        self.add_toolbar_button(top, "keypoint", "姿态关键点 (K)", lambda: self.set_tool_mode("keypoint"), "keypoint")
         self.add_toolbar_separator(top)
         self.add_toolbar_button(top, "undo", "撤销 (Ctrl+Z)", self.undo)
         self.add_toolbar_button(top, "redo", "重做 (Ctrl+Y)", self.redo)
@@ -1774,6 +1945,19 @@ class Annotator:
         self.box_list.delete(0, tk.END)
         for idx, box in enumerate(self.boxes):
             name = self.classes[box["cls"]]
+            if box.get("kind") == "classify":
+                self.box_list.insert(tk.END, f"{idx + 1}. Image class: {name}")
+                continue
+            if box.get("kind") == "polygon":
+                center_x = round(sum(point[0] for point in box["points"]) / len(box["points"]))
+                center_y = round(sum(point[1] for point in box["points"]) / len(box["points"]))
+                self.box_list.insert(tk.END, f"{idx + 1}. Polygon {name} points={len(box['points'])} center=[{center_x},{center_y}]")
+                continue
+            if box.get("kind") == "pose":
+                visible = sum(1 for _x, _y, flag in box.get("keypoints", []) if flag)
+                x1, y1, x2, y2 = [round(box[key]) for key in ("x1", "y1", "x2", "y2")]
+                self.box_list.insert(tk.END, f"{idx + 1}. Pose {name} kpts={visible}/{max(len(self.keypoint_names), len(box.get('keypoints', [])))} [{x1},{y1},{x2},{y2}]")
+                continue
             if box.get("kind", "aabb") == "obb":
                 center_x = round(sum(point[0] for point in box["points"]) / 4)
                 center_y = round(sum(point[1] for point in box["points"]) / 4)
@@ -1798,6 +1982,7 @@ class Annotator:
             order_file=str(self.order_file) if self.order_file else "",
             filter_order=self.filter_order,
             annotation_mode=self.annotation_mode,
+            keypoints=", ".join(self.keypoint_names),
             config_path=self.project_path,
         )
 

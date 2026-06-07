@@ -48,7 +48,8 @@ def create_main():
     parser = argparse.ArgumentParser(description="Create a YOLO Annotator Desktop project wrapper.")
     parser.add_argument("workspace", help="New empty project workspace")
     parser.add_argument("--name", default="dataset", help="Project name")
-    parser.add_argument("--mode", choices=("detect", "obb"), default="detect", help="Annotation mode")
+    parser.add_argument("--mode", choices=("detect", "obb", "segment", "pose", "classify"), default="detect", help="Annotation mode")
+    parser.add_argument("--keypoints", default="", help="Comma-separated keypoint names for pose projects")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--yolo-yaml", help="Import a YOLO data.yaml")
     source.add_argument("--images", help="Use an existing image folder")
@@ -73,7 +74,7 @@ def create_main():
             names = parse_class_text(args.classes or "object")
         if args.images:
             labels = args.labels or str(Path(args.images).resolve().parent / "labels")
-            project = create_project_from_folders(args.workspace, args.name, args.images, labels, names, args.mode)
+            project = create_project_from_folders(args.workspace, args.name, args.images, labels, names, args.mode, args.keypoints)
         else:
-            project = create_project(args.workspace, args.name, names, args.mode)
+            project = create_project(args.workspace, args.name, names, args.mode, args.keypoints)
     print(json.dumps({"project": str(project.config_path), "mode": project.annotation_mode}, ensure_ascii=False, indent=2))

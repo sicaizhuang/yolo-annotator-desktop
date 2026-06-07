@@ -44,9 +44,11 @@ class ProjectWizard(tk.Toplevel):
             "yaml": tk.StringVar(),
             "split": tk.StringVar(value="train"),
             "annotation_mode": tk.StringVar(value="detect"),
+            "keypoints": tk.StringVar(value="center"),
             "coco": tk.StringVar(),
             "xml_dir": tk.StringVar(),
         }
+        self.values["annotation_mode"].trace_add("write", lambda *_args: self.refresh_fields())
         self.build_ui()
         self.apply_preset()
         self.refresh_fields()
@@ -147,38 +149,47 @@ class ProjectWizard(tk.Toplevel):
             values=tuple(sorted(SUPPORTED_ANNOTATION_MODES)),
             state="readonly",
         ).grid(row=1, column=1, sticky="w", padx=8, pady=5)
+        row = 2
+        if self.values["annotation_mode"].get() == "pose":
+            self.field(row, "Keypoints", "keypoints")
+            ttk.Label(
+                self.fields,
+                text="Comma-separated names, e.g. left_eye, right_eye, nose.",
+                foreground="#606770",
+            ).grid(row=row + 1, column=1, sticky="w", padx=8)
+            row += 2
 
         method = self.method.get()
         if method == "empty":
-            self.field(2, "Project name", "name")
-            self.add_class_controls(3)
+            self.field(row, "Project name", "name")
+            self.add_class_controls(row + 1)
         elif method == "folders":
-            self.field(2, "Project name", "name")
-            self.field(3, "Image folder", "images", lambda: self.choose_dir("images"))
-            self.field(4, "Label folder (optional)", "labels", lambda: self.choose_dir("labels"))
-            self.add_class_controls(5)
+            self.field(row, "Project name", "name")
+            self.field(row + 1, "Image folder", "images", lambda: self.choose_dir("images"))
+            self.field(row + 2, "Label folder (optional)", "labels", lambda: self.choose_dir("labels"))
+            self.add_class_controls(row + 3)
         elif method == "yaml":
-            self.field(2, "YOLO data.yaml", "yaml", self.choose_yaml)
-            ttk.Label(self.fields, text="Split").grid(row=3, column=0, sticky="w", pady=5)
-            ttk.Combobox(self.fields, textvariable=self.values["split"], values=("train", "val", "test"), state="readonly").grid(row=3, column=1, sticky="w", padx=8, pady=5)
+            self.field(row, "YOLO data.yaml", "yaml", self.choose_yaml)
+            ttk.Label(self.fields, text="Split").grid(row=row + 1, column=0, sticky="w", pady=5)
+            ttk.Combobox(self.fields, textvariable=self.values["split"], values=("train", "val", "test"), state="readonly").grid(row=row + 1, column=1, sticky="w", padx=8, pady=5)
             ttk.Label(
                 self.fields,
                 text="Supports directory splits, image-list TXT splits, and split lists with multiple directories/files.",
                 foreground="#606770",
                 wraplength=460,
-            ).grid(row=4, column=1, sticky="w", padx=8)
+            ).grid(row=row + 2, column=1, sticky="w", padx=8)
         elif method == "coco":
-            self.field(2, "COCO JSON", "coco", self.choose_coco)
-            self.field(3, "Image root", "images", lambda: self.choose_dir("images"))
+            self.field(row, "COCO JSON", "coco", self.choose_coco)
+            self.field(row + 1, "Image root", "images", lambda: self.choose_dir("images"))
         else:
-            self.field(2, "Pascal VOC XML folder", "xml_dir", lambda: self.choose_dir("xml_dir"))
-            self.field(3, "Image root", "images", lambda: self.choose_dir("images"))
+            self.field(row, "Pascal VOC XML folder", "xml_dir", lambda: self.choose_dir("xml_dir"))
+            self.field(row + 1, "Image root", "images", lambda: self.choose_dir("images"))
             ttk.Label(
                 self.fields,
                 text="Pascal VOC stores axis-aligned rectangles, so it imports as detect mode only.",
                 foreground="#606770",
                 wraplength=460,
-            ).grid(row=4, column=1, sticky="w", padx=8)
+            ).grid(row=row + 2, column=1, sticky="w", padx=8)
 
     def create(self):
         workspace = self.values["workspace"].get().strip()
@@ -189,15 +200,15 @@ class ProjectWizard(tk.Toplevel):
         annotation_mode = self.values["annotation_mode"].get()
         try:
             if method == "empty":
-                project = create_project(workspace, self.values["name"].get(), self.classes(), annotation_mode)
+                project = create_project(workspace, self.values["name"].get(), self.classes(), annotation_mode, self.keypoints())
             elif method == "folders":
                 images = self.values["images"].get().strip()
                 labels = self.values["labels"].get().strip() or str(Path(images).parent / "labels")
-                project = create_project_from_folders(workspace, self.values["name"].get(), images, labels, self.classes(), annotation_mode)
+                project = create_project_from_folders(workspace, self.values["name"].get(), images, labels, self.classes(), annotation_mode, self.keypoints())
             elif method == "yaml":
                 project = create_project_from_yolo_yaml(workspace, self.values["yaml"].get(), self.values["split"].get(), annotation_mode)
             elif method == "coco":
-                project = create_project_from_coco(workspace, self.values["coco"].get(), self.values["images"].get(), annotation_mode)
+                project = create_project_from_coco(workspace, self.values["coco"].get(), self.values["images"].get(), annotation_mode, self.keypoints())
             else:
                 if annotation_mode != "detect":
                     raise ValueError("Pascal VOC XML cannot preserve rotated boxes. Choose detect mode.")
@@ -210,3 +221,6 @@ class ProjectWizard(tk.Toplevel):
 
     def classes(self):
         return parse_class_text(self.values["classes"].get())
+
+    def keypoints(self):
+        return ", ".join(parse_class_text(self.values["keypoints"].get())) if self.values["annotation_mode"].get() == "pose" else ""

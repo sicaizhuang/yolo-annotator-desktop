@@ -34,6 +34,19 @@ labeling loop fast, predictable, recoverable, and easy to learn.
 - Added a `yad-create` command so project creation can be scripted in notebooks,
   CI jobs, or team handoff packages.
 
+## Resolved In 0.5.0
+
+- Added mainstream YOLO task modes: Detect, OBB, Segment, Pose, and Classify.
+- Centralized label parsing and serialization so GUI, QC, and export share the
+  same task-format rules.
+- Added polygon segmentation drawing and vertex refinement.
+- Added a practical pose workflow: box first, then ordered keypoint placement.
+- Added image-level classification assignment and YOLO class-folder export.
+- Extended QC to segment polygons, pose keypoints, classification labels, and
+  mixed task formats.
+- Added pose `kpt_shape` export, COCO segmentation polygon round trips, and
+  format-agnostic class-ID remapping.
+
 ## Remaining Risks And Roadmap
 
 - The annotation window is intentionally lightweight but remains a large Tk
@@ -43,8 +56,9 @@ labeling loop fast, predictable, recoverable, and easy to learn.
   currently indeterminate and jobs cannot yet be cancelled safely.
 - The visible interface is currently Simplified Chinese. A translation catalog
   is needed before claiming full internationalization.
-- Multi-object selection, polygon/segmentation tasks, video annotation, and
-  model-assisted pre-labeling remain outside the current bounding-box scope.
+- Multi-object selection, video annotation, tracking/ReID, multi-attribute
+  schemas, advanced pose skeleton templates, and model-assisted pre-labeling
+  remain future work.
 - Exact duplicate images are detected; near-duplicate clustering and
   leakage-aware train/validation grouping remain future dataset-science work.
 

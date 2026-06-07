@@ -114,6 +114,47 @@ class ProjectAndQCTests(unittest.TestCase):
         self.assertEqual(report["blocking_issue_count"], 0)
         self.assertEqual(report["boxes"], 1)
 
+    def test_qc_accepts_yolo_segmentation_polygons(self):
+        segment = create_project(self.root / "segment", "segment", ["part"], "segment")
+        Image.new("RGB", (100, 80), "white").save(segment.image_dir / "poly.jpg")
+        (segment.label_dir / "poly.txt").write_text(
+            "0 0.10 0.10 0.80 0.10 0.70 0.70 0.20 0.60 0.08 0.30\n",
+            encoding="utf-8",
+        )
+        report = inspect_project(segment)
+        self.assertEqual(report["blocking_issue_count"], 0)
+        self.assertEqual(report["format_counts"], {"segment": 1})
+        export_yolo_dataset(segment, self.root / "segment_export")
+        self.assertTrue((self.root / "segment_export" / "labels" / "train" / "poly.txt").exists())
+
+    def test_qc_accepts_yolo_pose_and_exports_kpt_shape(self):
+        pose = create_project(self.root / "pose", "pose", ["person"], "pose", "nose, tail")
+        Image.new("RGB", (100, 80), "white").save(pose.image_dir / "pose.jpg")
+        (pose.label_dir / "pose.txt").write_text(
+            "0 0.50 0.50 0.40 0.40 0.45 0.45 2 0.55 0.55 1\n",
+            encoding="utf-8",
+        )
+        report = inspect_project(pose)
+        self.assertEqual(report["blocking_issue_count"], 0)
+        self.assertEqual(report["format_counts"], {"pose": 1})
+        export_yolo_dataset(pose, self.root / "pose_export")
+        data_yaml = (self.root / "pose_export" / "data.yaml").read_text(encoding="utf-8")
+        self.assertIn("kpt_shape: [2, 3]", data_yaml)
+
+    def test_classification_project_exports_class_folders(self):
+        classify = create_project(self.root / "classify", "classify", ["good", "bad"], "classify")
+        Image.new("RGB", (30, 30), "white").save(classify.image_dir / "a.jpg")
+        Image.new("RGB", (30, 30), "black").save(classify.image_dir / "b.jpg")
+        (classify.label_dir / "a.txt").write_text("0\n", encoding="utf-8")
+        (classify.label_dir / "b.txt").write_text("1\n", encoding="utf-8")
+        report = inspect_project(classify)
+        self.assertEqual(report["blocking_issue_count"], 0)
+        self.assertEqual(report["format_counts"], {"classify": 2})
+        result = export_yolo_dataset(classify, self.root / "classify_export", val_ratio=0.5, seed=1)
+        self.assertEqual(result["train"] + result["val"], 2)
+        exported = list((self.root / "classify_export").rglob("*.jpg"))
+        self.assertEqual(len(exported), 2)
+
     def test_qc_blocks_mixed_detect_and_obb_export(self):
         (self.project.label_dir / "image_3.txt").write_text(
             "0 0.2 0.2 0.4 0.2 0.4 0.4 0.2 0.4\n",

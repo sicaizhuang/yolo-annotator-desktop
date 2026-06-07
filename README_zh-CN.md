@@ -134,3 +134,18 @@ py -m unittest discover -s tests -v
 ```
 
 许可证：MIT。
+
+## v0.5.0 note
+
+Open-source v0.5.0 adds mainstream YOLO task modes:
+
+- `detect`: standard bounding boxes.
+- `obb`: Ultralytics YOLO OBB rotated boxes.
+- `segment`: YOLO polygon segmentation labels.
+- `pose`: box plus keypoints, with `kpt_shape` export.
+- `classify`: image-level labels exported as YOLO classification folders.
+
+New shortcuts:
+
+- `P`: polygon segmentation. Click vertices, then press `Enter` or click the first point to finish.
+- `K`: pose keypoint mode. Draw/select a pose box first, then click keypoints in order.

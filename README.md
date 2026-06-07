@@ -1,6 +1,6 @@
 # YOLO Annotator Desktop
 
-A fast, local-first desktop bounding-box annotator for YOLO datasets.
+A fast, local-first desktop annotator for YOLO datasets.
 
 It grew out of a real electronic-component sorting project where annotation speed,
 safe autosave, precise box editing, and offline operation mattered more than a
@@ -12,6 +12,9 @@ large web platform.
 - Searchable image browser with reviewed/labeled/empty filters and explicit reviewed-empty images.
 - Draw, select, move, resize, nudge, reclassify, copy, paste, and duplicate YOLO boxes.
 - Three-point rotated rectangles with rectangular corner resizing and standard YOLO OBB storage.
+- Polygon segmentation labels using standard YOLO segmentation TXT rows.
+- Pose projects with box-plus-keypoint labels and `kpt_shape` export.
+- Image classification projects with class-folder YOLO export.
 - Atomic autosave, undo/redo, session backups, stale-aware project locks, and crash logs.
 - Malformed label rows are preserved during editing instead of silently discarded.
 - Portable `.yad.json` projects and nested image/label directory support.
@@ -74,6 +77,7 @@ Each project uses a small JSON file:
   "order_file": "",
   "filter_order": false,
   "annotation_mode": "detect",
+  "keypoints": "",
   "version": 1
 }
 ```
@@ -92,6 +96,21 @@ Rotated rectangles use standard YOLO OBB format:
 ```text
 class_id x1 y1 x2 y2 x3 y3 x4 y4
 ```
+
+Segmentation polygons use standard YOLO segmentation format:
+
+```text
+class_id x1 y1 x2 y2 x3 y3 ...
+```
+
+Pose labels use Ultralytics-style box plus keypoints:
+
+```text
+class_id x_center y_center width height kpt_x kpt_y visible ...
+```
+
+Classification projects store one class ID per image in the project labels and
+export to the usual YOLO classification folder layout.
 
 ## Import Sources
 
@@ -118,6 +137,8 @@ only the selected split is shown.
 | Draw box | `B`; left-drag anywhere on the image |
 | Standard rectangle mode | `B` or the rectangle toolbar icon |
 | Three-point rotated rectangle | `R` or the rotated-rectangle toolbar icon; drag first edge, release, move to set width, click |
+| Polygon segmentation | `P`; click vertices, press `Enter` or click the first point to finish |
+| Pose keypoints | Draw/select a pose box, press `K`, then click keypoints in order |
 | Select box | Left-click box, right-click box, or use list |
 | Resize selected box | Drag white handles, including OBB corners |
 | Nudge selected box | Arrow keys; hold `Shift` for 10 pixels |

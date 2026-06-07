@@ -17,7 +17,7 @@ from .safe_io import atomic_write_json, atomic_write_text
 
 PROJECT_SUFFIX = ".yad.json"
 CURRENT_PROJECT_VERSION = 1
-SUPPORTED_ANNOTATION_MODES = {"detect", "obb"}
+SUPPORTED_ANNOTATION_MODES = {"detect", "obb", "segment", "pose", "classify"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 
@@ -31,6 +31,7 @@ class ProjectConfig:
     order_file: str = ""
     filter_order: bool = False
     annotation_mode: str = "detect"
+    keypoints: str = ""
     version: int = 1
     config_path: Path | None = None
 
@@ -66,6 +67,16 @@ class ProjectConfig:
             line.strip()
             for line in self.classes_path.read_text(encoding="utf-8-sig").splitlines()
             if line.strip()
+        ]
+
+    def keypoint_names(self) -> list[str]:
+        if not self.keypoints:
+            return []
+        return [
+            item.strip()
+            for line in str(self.keypoints).splitlines()
+            for item in line.split(",")
+            if item.strip()
         ]
 
     def validate(self) -> list[str]:
@@ -164,7 +175,13 @@ def ensure_new_project_workspace(root: str | Path) -> Path:
     return root_path
 
 
-def create_project(root: str | Path, name: str, classes: list[str], annotation_mode: str = "detect") -> ProjectConfig:
+def create_project(
+    root: str | Path,
+    name: str,
+    classes: list[str],
+    annotation_mode: str = "detect",
+    keypoints: str = "",
+) -> ProjectConfig:
     if annotation_mode not in SUPPORTED_ANNOTATION_MODES:
         raise ValueError(f"Unsupported annotation mode: {annotation_mode}")
     root_path = ensure_new_project_workspace(root)
@@ -180,6 +197,7 @@ def create_project(root: str | Path, name: str, classes: list[str], annotation_m
         labels="labels",
         classes="classes.txt",
         annotation_mode=annotation_mode,
+        keypoints=keypoints,
         config_path=root_path / f"project{PROJECT_SUFFIX}",
     )
     project.save()
@@ -193,6 +211,7 @@ def create_project_from_folders(
     label_dir: str | Path,
     classes: list[str],
     annotation_mode: str = "detect",
+    keypoints: str = "",
 ) -> ProjectConfig:
     if annotation_mode not in SUPPORTED_ANNOTATION_MODES:
         raise ValueError(f"Unsupported annotation mode: {annotation_mode}")
@@ -208,6 +227,7 @@ def create_project_from_folders(
         labels=str(labels),
         classes="classes.txt",
         annotation_mode=annotation_mode,
+        keypoints=keypoints,
         config_path=workspace_path / f"project{PROJECT_SUFFIX}",
     )
     project.save()
@@ -232,6 +252,7 @@ def create_project_from_yolo_yaml(
     if not split_value:
         raise ValueError(f"The YAML file has no '{split}' split.")
     names = names_from_yolo_payload(data)
+    keypoints = _keypoints_from_yolo_payload(data) if annotation_mode == "pose" else ""
 
     split_items = split_value if isinstance(split_value, list) else [split_value]
     resolved_items = [_resolve_yolo_path(item, dataset_root, yaml_file.parent) for item in split_items]
@@ -245,6 +266,7 @@ def create_project_from_yolo_yaml(
             _infer_yolo_label_root(image_dir),
             names,
             annotation_mode,
+            keypoints,
         )
 
     image_paths: list[Path] = []
@@ -267,6 +289,7 @@ def create_project_from_yolo_yaml(
         _infer_yolo_label_root(image_root),
         names,
         annotation_mode,
+        keypoints,
     )
     order_path = project.config_path.parent / f"{split}_order.txt"
     order_lines = []
@@ -345,11 +368,29 @@ def _infer_yolo_label_root(image_dir: Path) -> Path:
     return image_dir.parent / "labels" / image_dir.name
 
 
+def _keypoints_from_yolo_payload(data: dict) -> str:
+    names = data.get("keypoints") or data.get("keypoint_names") or data.get("kpt_names")
+    if isinstance(names, dict):
+        return ", ".join(str(names[key]) for key in sorted(names, key=lambda value: int(value)))
+    if isinstance(names, list):
+        return ", ".join(str(name) for name in names)
+    shape = data.get("kpt_shape")
+    if isinstance(shape, list) and shape:
+        try:
+            count = int(shape[0])
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            return ", ".join(f"keypoint_{idx + 1}" for idx in range(count))
+    return ""
+
+
 def create_project_from_coco(
     workspace: str | Path,
     coco_json: str | Path,
     image_dir: str | Path,
     annotation_mode: str = "detect",
+    keypoints: str = "",
 ) -> ProjectConfig:
     if annotation_mode not in SUPPORTED_ANNOTATION_MODES:
         raise ValueError(f"Unsupported annotation mode: {annotation_mode}")
@@ -368,6 +409,7 @@ def create_project_from_coco(
         Path(workspace).resolve() / "labels",
         names,
         annotation_mode,
+        keypoints,
     )
     image_records = {int(item["id"]): item for item in payload.get("images", [])}
     grouped: dict[int, list[str]] = {}
@@ -382,10 +424,15 @@ def create_project_from_coco(
         if len(bbox) != 4 or width <= 0 or height <= 0:
             continue
         x, y, box_width, box_height = map(float, bbox)
-        if annotation_mode == "obb":
+        if annotation_mode in {"obb", "segment"}:
             segmentation = annotation.get("segmentation", [])
             polygon = segmentation[0] if isinstance(segmentation, list) and segmentation else []
-            if isinstance(polygon, list) and len(polygon) == 8:
+            if annotation_mode == "segment" and isinstance(polygon, list) and len(polygon) >= 6 and len(polygon) % 2 == 0:
+                coords = [
+                    value / (width if idx % 2 == 0 else height)
+                    for idx, value in enumerate(map(float, polygon))
+                ]
+            elif annotation_mode == "obb" and isinstance(polygon, list) and len(polygon) == 8:
                 coords = [
                     value / (width if idx % 2 == 0 else height)
                     for idx, value in enumerate(map(float, polygon))
@@ -509,7 +556,7 @@ def remap_classes(project: ProjectConfig, names: list[str], old_to_new: dict[int
         changed = False
         for raw_line in label.read_text(encoding="utf-8-sig").splitlines():
             parts = raw_line.split()
-            if len(parts) not in (5, 9):
+            if not parts:
                 output.append(raw_line)
                 continue
             try:

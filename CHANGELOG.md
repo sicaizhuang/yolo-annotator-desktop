@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0 - 2026-06-07
+
+- Expanded project modes beyond Detect/OBB to include YOLO Segmentation, YOLO Pose, and YOLO Classification.
+- Added a shared label-format layer for Detect, OBB, Segment polygon, Pose keypoint, and image-class labels.
+- Added polygon segmentation drawing: click points, press Enter or click the first point to finish, drag vertices to refine.
+- Added pose workflow: draw a box, switch to keypoint mode, then place configured keypoints in order.
+- Added classification workflow where the current class can be assigned to the whole image.
+- Updated quality checks to validate segment polygons, pose keypoints, classification labels, duplicate annotations, and mixed task formats.
+- Added YOLO classification export using train/val class folders.
+- Added `kpt_shape` output for pose `data.yaml` exports when keypoints are configured.
+- Added COCO segmentation polygon import/export support and clearer VOC export rejection for non-rectangle tasks.
+- Made class remapping format-agnostic so class changes work safely across Detect, OBB, Segment, Pose, and Classify labels.
+- Added toolbar/menu entries for polygon and keypoint tools.
+- Added tests for segmentation, pose, and classification projects.
+
 ## 0.4.1 - 2026-06-07
 
 - Added built-in class presets for single-object, COCO 80, Pascal VOC 20, electronics starter, and defect-detection starter projects.

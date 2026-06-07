@@ -114,6 +114,19 @@ class IconSet:
         draw.polygon([(4, 7), (14, 3), (17, 13), (7, 17)], outline=self.accent)
         self._line(draw, [(4, 7), (14, 3), (17, 13), (7, 17), (4, 7)], fill=self.accent)
 
+    def _draw_polygon(self, draw):
+        points = [(4, 6), (11, 3), (17, 9), (14, 17), (5, 15)]
+        self._line(draw, [*points, points[0]], fill=self.accent)
+        for x, y in points:
+            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill="#ffffff", outline=self.color, width=1)
+
+    def _draw_keypoint(self, draw):
+        draw.ellipse((4, 4, 10, 10), outline=self.accent, width=2)
+        draw.ellipse((12, 3, 18, 9), outline=self.accent, width=2)
+        draw.ellipse((8, 12, 14, 18), outline=self.accent, width=2)
+        self._line(draw, [(10, 7), (12, 6)], fill=self.color)
+        self._line(draw, [(9, 10), (11, 12)], fill=self.color)
+
     def _draw_previous(self, draw):
         draw.polygon([(14, 3), (5, 10), (14, 17)], fill=self.color)
 
