@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import zipfile
 
@@ -19,11 +20,15 @@ EXCLUDED_PARTS = {
 }
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".log"}
 EXCLUDED_NAMES = {"run_ocg_project.cmd", "ocg_qc_report.json"}
-FORBIDDEN_TEXT = (
-    "D:" + "\\MODEL\\YOLO_Tutorial",
-    "192.168." + "0.177",
-    str(Path.home()),
-)
+
+
+def forbidden_text() -> tuple[str, ...]:
+    extra = [
+        item.strip()
+        for item in os.environ.get("YAD_RELEASE_FORBIDDEN_TEXT", "").split(os.pathsep)
+        if item.strip()
+    ]
+    return (*extra, str(Path.home()))
 
 
 def is_public_file(path: Path, root: Path) -> bool:
@@ -39,7 +44,7 @@ def validate_text(path: Path):
     if path.suffix.lower() not in {".py", ".md", ".toml", ".txt", ".json", ".yml", ".yaml", ".cmd", ".ps1", ".vbs"}:
         return
     text = path.read_text(encoding="utf-8-sig", errors="ignore")
-    for forbidden in FORBIDDEN_TEXT:
+    for forbidden in forbidden_text():
         if forbidden in text:
             raise RuntimeError(f"Private value found in public file {path}: {forbidden}")
 
